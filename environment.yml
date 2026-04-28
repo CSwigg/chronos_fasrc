@@ -1,0 +1,21 @@
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - wheel
+  - setuptools
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - astropy
+  - tqdm
+  - dustmaps
+  - emcee
+  - arviz
+  - psutil
+  - scikit-optimize
+  - shapely
+  - pip:
+      - imf

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chronos-fasrc"
+version = "0.1.0"
+description = "Chronos-only age and mass fitting workflows for FASRC"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "matplotlib",
+    "astropy",
+    "tqdm",
+    "dustmaps",
+    "emcee",
+    "arviz",
+    "psutil",
+    "scikit-optimize",
+    "shapely",
+    "imf",
+]
+
+[tool.setuptools.packages.find]
+include = ["chronos*", "mapper*", "workflows*"]
+
+[tool.setuptools.package-data]
+chronos = ["data/**/*"]

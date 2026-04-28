@@ -1,0 +1,38 @@
+# Chronos-only runtime config.
+#
+# This file is designed to work both locally and on FASRC from the
+# chronos_fasrc directory. Put the large private files under inputs/.
+
+[inputs]
+cluster_catalog_csv = "data/clusters/hunt_partII_partIII_merged.csv"
+cluster_family_csv = "data/clusters/cluster_sample_data.csv"
+member_catalog_csv = "inputs/members-2.csv"
+velocity_catalog_csv = "data/clusters/cluster_velocities_jan2026.csv"
+chronos_ages_csv = "runs/current/hunt_sample_chronos_ages_multiprocessing.csv"
+lifetime_tracks_csv = "data/support/age_mass_from_Z0_parsec_tracks.csv"
+dust_xyz_fits = "inputs/unused_dust_xyz_placeholder.fits"
+extinction_healpix_fits = "inputs/mean_and_std_healpix.fits"
+gaia_neighborhood_cache_dir = ""
+hunt_selection_cache_dir = ""
+mccallum_ne_fits = ""
+mist_isochrone_dir = "inputs/mist_isochrones"
+
+[surveys]
+apogee = ""
+galah = ""
+lamost = ""
+desi = ""
+ges = ""
+mwm = ""
+mwm_aspcap = ""
+rave = ""
+
+[outputs]
+velocity_dir = "runs/current/velocities"
+chronos_dir = "runs/current/chronos"
+map_dir = "runs/current/map_unused"
+paper_dir = "runs/current/paper_unused"
+visualizer_plots_dir = "runs/current/plots_unused"
+
+[velocity]
+surveys_to_use = []
