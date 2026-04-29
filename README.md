@@ -9,6 +9,7 @@ pipeline code.
 
 - `chronos/`: vendored Chronos fitting code and bundled PARSEC/Baraffe data.
 - `workflows/run_chronos_*.py`: Chronos age and mass entry points.
+- `workflows/plot_chronos_fit_outputs.py`: local plotting from saved posterior samples and fit summaries.
 - `mapper/sampling.py`: the one IMF helper needed by Chronos mass fitting.
 - `data/clusters/` and `data/support/`: small CSV inputs needed by the Chronos workflows.
 - `configs/paths.toml`: Chronos-only paths, with large private inputs expected in `inputs/`.
@@ -39,6 +40,9 @@ If you run MIST variants, also put MIST Gaia CMD files under:
 inputs/mist_isochrones/
 ```
 
+The production Hunt run fits PARSEC, MIST, and Baraffe, so `inputs/mist_isochrones/`
+is required for the full all-model configuration.
+
 ## Local Smoke Test
 
 From this directory:
@@ -47,6 +51,28 @@ From this directory:
 python -m workflows.run_chronos_masses --config configs/paths.toml --help
 python -m workflows.run_chronos_hunt_lt150_mf_fit --config configs/paths.toml --help
 ```
+
+## Local Timing Test
+
+Run the production sampler settings on 50 reproducibly sampled clusters:
+
+```bash
+./scripts/run_local_hunt_lt150_test50.sh
+```
+
+Defaults:
+
+- models: `parsec mist baraffe`
+- walkers: `96`
+- burn-in: `2000`
+- production steps: `10000`
+- saved posterior samples: `20000` per cluster/model
+- mass draws: `1000`
+- IMF draws: `1000`
+- fit-time plotting: off
+
+Set `N_PROCESSES`, `OUTPUT_DIRNAME`, or `SAMPLE_SEED` in the environment to override
+the local test wrapper.
 
 ## FASRC Setup
 
@@ -85,8 +111,19 @@ Pull light results back locally:
 ./scripts/sync_results_from_fasrc.sh
 ```
 
+Then make plots locally from the synced samples and fit summaries:
+
+```bash
+./scripts/plot_chronos_fit_outputs.sh
+```
+
+Local plotting needs the member catalog and MIST isochrone directory available
+under the paths in `configs/paths.toml`.
+
 ## Notes
 
 - Heavy Chronos work should run through Slurm, not on a login node.
 - The Slurm script sets BLAS/OpenMP thread counts to 1 and matches Chronos workers to `SLURM_CPUS_PER_TASK`.
+- The production Hunt workflow stores compact posterior `.npz` samples and sampler diagnostics, but does not create PNG plots during fitting.
+- Worker stdout/stderr and warnings are captured under each run's `worker_logs/` directory so the terminal progress bar stays readable.
 - `inputs/`, `runs/`, `logs/`, and `envs/` are ignored by Git so large data and results stay out of commits.

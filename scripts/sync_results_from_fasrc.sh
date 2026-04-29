@@ -9,9 +9,11 @@ rsync -az --progress \
   --include "*/" \
   --include "*.csv" \
   --include "*.json" \
+  --include "*.npz" \
+  --include "*.npy" \
   --include "*.txt" \
+  --include "*.log" \
   --include "*.out" \
   --include "*.err" \
-  --include "*.png" \
   --exclude "*" \
   "$REMOTE" "$LOCAL_DIR/runs/current/"

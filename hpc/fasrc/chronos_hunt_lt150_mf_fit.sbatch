@@ -13,6 +13,9 @@ PROJECT_DIR="${PROJECT_DIR:-$SLURM_SUBMIT_DIR}"
 ENV_PREFIX="${ENV_PREFIX:-$HOME/chronos_fasrc/envs/chronos}"
 CONFIG_PATH="${CONFIG_PATH:-configs/paths.toml}"
 N_PROCESSES="${N_PROCESSES:-${SLURM_CPUS_PER_TASK:-8}}"
+OUTPUT_DIRNAME="${OUTPUT_DIRNAME:-}"
+SAMPLE_N_CLUSTERS="${SAMPLE_N_CLUSTERS:-}"
+SAMPLE_SEED="${SAMPLE_SEED:-}"
 
 module purge
 module load python
@@ -31,7 +34,19 @@ export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
-python -m workflows.run_chronos_hunt_lt150_mf_fit \
-  --config "$CONFIG_PATH" \
-  --n-processes "$N_PROCESSES" \
-  "$@"
+PY_ARGS=(
+  --config "$CONFIG_PATH"
+  --n-processes "$N_PROCESSES"
+)
+
+if [[ -n "$OUTPUT_DIRNAME" ]]; then
+  PY_ARGS+=(--output-dirname "$OUTPUT_DIRNAME")
+fi
+if [[ -n "$SAMPLE_N_CLUSTERS" ]]; then
+  PY_ARGS+=(--sample-n-clusters "$SAMPLE_N_CLUSTERS")
+fi
+if [[ -n "$SAMPLE_SEED" ]]; then
+  PY_ARGS+=(--sample-seed "$SAMPLE_SEED")
+fi
+
+python -m workflows.run_chronos_hunt_lt150_mf_fit "${PY_ARGS[@]}" "$@"

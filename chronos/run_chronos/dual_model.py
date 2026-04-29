@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 import json
@@ -10,7 +11,11 @@ import re
 import sys
 import tempfile
 import time
+import warnings
 from typing import Any
+
+warnings.filterwarnings("ignore", message=r"\s*ArviZ is undergoing a major refactor.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message="Configuration file not found:.*", module="dustmaps.config")
 
 import arviz as az
 import matplotlib
@@ -63,6 +68,11 @@ class DualModelRunConfig:
     mass_output_prefix: str = "mass_swiggum"
     save_mass_draws: bool = False
     save_mass_diagnostic_plots: bool = False
+    save_fit_plots: bool = True
+    save_posterior_samples: bool = False
+    posterior_sample_size: int = 20_000
+    quiet_worker_output: bool = True
+    print_cluster_updates: bool = False
     model_names: tuple[str, ...] = ("parsec", "baraffe")
     output_dirname: str = "dual_model_refit"
 
@@ -103,6 +113,21 @@ def _atomic_write_csv(path: Path, df: pd.DataFrame) -> None:
         df.to_csv(handle.name, index=False)
         tmp_path = Path(handle.name)
     os.replace(tmp_path, path)
+
+
+def _atomic_save_npz_compressed(path: Path, **arrays: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", suffix=".npz", dir=path.parent, delete=False) as handle:
+        tmp_path = Path(handle.name)
+    try:
+        np.savez_compressed(tmp_path, **arrays)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
 
 
 def _clean_float(value: Any) -> float | None:
@@ -312,6 +337,116 @@ def _save_isochrone_plot(
     plt.close(fig)
 
 
+def _best_fit_payload(best_fit: np.ndarray, best_log_prob: float | None) -> dict[str, float | None]:
+    best_fit = np.asarray(best_fit, dtype=float)
+    keys = ["log_age", "feh", "av", "skewness", "scale"]
+    payload = {f"best_fit_{key}": None for key in keys}
+    payload.update({f"best_fit_{key}": _clean_float(value) for key, value in zip(keys, best_fit, strict=False)})
+    if best_fit.size:
+        payload["best_fit_age_myr"] = _clean_float(10 ** float(best_fit[0]) / 1e6)
+    else:
+        payload["best_fit_age_myr"] = None
+    payload["best_log_prob"] = _clean_float(best_log_prob)
+    return payload
+
+
+def _save_posterior_samples_and_diagnostics(
+    *,
+    sampler,
+    samples: np.ndarray,
+    best_fit: np.ndarray,
+    output_path: Path,
+    diagnostics_path: Path,
+    fit_config: ChronosFitConfig,
+    cluster_name: str,
+    model_name: str,
+    sample_size: int,
+    seed: int,
+) -> dict[str, Any]:
+    samples = np.asarray(samples, dtype=float)
+    log_prob = np.asarray(sampler.get_log_prob(flat=True), dtype=float)
+    if samples.shape[0] != log_prob.shape[0]:
+        raise ValueError(
+            f"Sample/log-probability length mismatch for {cluster_name} {model_name}: "
+            f"{samples.shape[0]} != {log_prob.shape[0]}"
+        )
+
+    finite = np.isfinite(log_prob) & np.all(np.isfinite(samples), axis=1)
+    candidate_indices = np.flatnonzero(finite)
+    rng = np.random.default_rng(int(seed))
+    n_save = min(int(sample_size), int(candidate_indices.size))
+    if n_save > 0 and n_save < candidate_indices.size:
+        selected_indices = np.sort(rng.choice(candidate_indices, size=n_save, replace=False))
+    else:
+        selected_indices = candidate_indices
+
+    posterior_columns = np.array(
+        ["log_age", "age_myr", "feh", "av", "skewness", "scale", "log_prob"],
+        dtype="U16",
+    )
+    selected_samples = samples[selected_indices]
+    selected_log_prob = log_prob[selected_indices]
+    age_myr = 10 ** selected_samples[:, 0] / 1e6 if selected_samples.size else np.array([], dtype=float)
+    posterior = np.column_stack(
+        [
+            selected_samples[:, 0],
+            age_myr,
+            selected_samples[:, 1],
+            selected_samples[:, 2],
+            selected_samples[:, 3],
+            selected_samples[:, 4],
+            selected_log_prob,
+        ]
+    ) if selected_samples.size else np.empty((0, len(posterior_columns)), dtype=float)
+    _atomic_save_npz_compressed(
+        output_path,
+        posterior=posterior,
+        columns=posterior_columns,
+        selected_flat_indices=selected_indices.astype(np.int64),
+    )
+
+    best_index = int(np.nanargmax(log_prob)) if log_prob.size and np.any(np.isfinite(log_prob)) else None
+    best_log_prob = float(log_prob[best_index]) if best_index is not None else None
+    autocorr_time = None
+    autocorr_error = None
+    try:
+        autocorr_time = np.asarray(sampler.get_autocorr_time(tol=0), dtype=float).tolist()
+    except Exception as exc:
+        autocorr_error = str(exc)
+
+    acceptance_fraction = np.asarray(getattr(sampler, "acceptance_fraction", []), dtype=float)
+    diagnostics = {
+        "cluster": str(cluster_name),
+        "model": str(model_name),
+        "posterior_samples_npz": str(output_path),
+        "posterior_columns": posterior_columns.tolist(),
+        "nwalkers": int(fit_config.nwalkers),
+        "burnin": int(fit_config.burnin),
+        "nsteps": int(fit_config.nsteps),
+        "ndim": int(samples.shape[1]) if samples.ndim == 2 else None,
+        "total_flat_samples": int(samples.shape[0]),
+        "finite_flat_samples": int(candidate_indices.size),
+        "saved_flat_samples": int(len(selected_indices)),
+        "posterior_sample_size_requested": int(sample_size),
+        "posterior_sample_seed": int(seed),
+        "best_flat_index": best_index,
+        **_best_fit_payload(np.asarray(best_fit, dtype=float), best_log_prob),
+        "acceptance_fraction_mean": _clean_float(np.nanmean(acceptance_fraction)) if acceptance_fraction.size else None,
+        "acceptance_fraction_min": _clean_float(np.nanmin(acceptance_fraction)) if acceptance_fraction.size else None,
+        "acceptance_fraction_max": _clean_float(np.nanmax(acceptance_fraction)) if acceptance_fraction.size else None,
+        "acceptance_fraction_by_walker": acceptance_fraction.tolist(),
+        "autocorr_time": autocorr_time,
+        "autocorr_time_error": autocorr_error,
+    }
+    _atomic_write_json(diagnostics_path, diagnostics)
+    return {
+        "posterior_samples_npz": str(output_path),
+        "sampler_diagnostics_json": str(diagnostics_path),
+        "posterior_saved_samples": int(len(selected_indices)),
+        **_best_fit_payload(np.asarray(best_fit, dtype=float), best_log_prob),
+    }
+
+
 def _fit_single_model(
     cluster_name: str,
     df_group: pd.DataFrame,
@@ -328,10 +463,12 @@ def _fit_single_model(
     model_output_root = output_root / model_name
     posterior_path = model_output_root / "posterior_plots" / f"{plot_slug}_posterior.png"
     isochrone_path = model_output_root / "isochrone_plots" / f"{plot_slug}_isochrone.png"
+    posterior_samples_path = model_output_root / "posterior_samples" / f"{plot_slug}_{model_name}_posterior.npz"
+    diagnostics_path = model_output_root / "sampler_diagnostics" / f"{plot_slug}_{model_name}_diagnostics.json"
 
     try:
         fitter = _configure_cluster_fitter(df_group=df_group, fit_config=fit_config, extinction_prior=descriptor)
-        _sampler, _best_fit, samples = fitter.fit_bayesian(**fit_config.sampler_kwargs())
+        sampler, best_fit, samples = fitter.fit_bayesian(**fit_config.sampler_kwargs())
         summary = summarize_skew_cauchy_samples(samples, hdi_prob=fit_config.summary_hdi_prob)
         _distances, masses, keep_mask = fitter.compute_fit_info(
             logAge=np.log10(summary.age_mode * 1e6),
@@ -382,21 +519,37 @@ def _fit_single_model(
             )
             swiggum_outputs = swiggum_estimate.as_row(mass_prefix)
 
-        _save_posterior_plot(
-            samples=samples,
-            output_path=posterior_path,
-            hdi_prob=fit_config.posterior_plot_hdi_prob,
-        )
-        _save_isochrone_plot(
-            fitter,
-            age_mode=summary.age_mode,
-            age_lo=summary.age_lo,
-            age_hi=summary.age_hi,
-            av_mode=summary.av_mode,
-            av_lo=summary.av_lo,
-            av_hi=summary.av_hi,
-            output_path=isochrone_path,
-        )
+        posterior_outputs: dict[str, Any] = {}
+        if run_config.save_posterior_samples:
+            posterior_outputs = _save_posterior_samples_and_diagnostics(
+                sampler=sampler,
+                samples=samples,
+                best_fit=best_fit,
+                output_path=posterior_samples_path,
+                diagnostics_path=diagnostics_path,
+                fit_config=fit_config,
+                cluster_name=cluster_name,
+                model_name=model_name,
+                sample_size=int(run_config.posterior_sample_size),
+                seed=_stable_seed(cluster_name, model_name, "posterior"),
+            )
+
+        if run_config.save_fit_plots:
+            _save_posterior_plot(
+                samples=samples,
+                output_path=posterior_path,
+                hdi_prob=fit_config.posterior_plot_hdi_prob,
+            )
+            _save_isochrone_plot(
+                fitter,
+                age_mode=summary.age_mode,
+                age_lo=summary.age_lo,
+                age_hi=summary.age_hi,
+                av_mode=summary.av_mode,
+                av_lo=summary.av_lo,
+                av_hi=summary.av_hi,
+                output_path=isochrone_path,
+            )
         return {
             "status": "success",
             "runtime_sec": float(time.time() - started),
@@ -406,10 +559,11 @@ def _fit_single_model(
             "av_mode": summary.av_mode,
             "av_lo": summary.av_lo,
             "av_hi": summary.av_hi,
-            "posterior_plot": str(posterior_path),
-            "isochrone_plot": str(isochrone_path),
+            "posterior_plot": str(posterior_path) if run_config.save_fit_plots else None,
+            "isochrone_plot": str(isochrone_path) if run_config.save_fit_plots else None,
             **mass_outputs,
             **swiggum_outputs,
+            **posterior_outputs,
         }
     except Exception as exc:
         swiggum_outputs: dict[str, Any] = {}
@@ -429,8 +583,12 @@ def _fit_single_model(
             "av_mode": None,
             "av_lo": None,
             "av_hi": None,
-            "posterior_plot": str(posterior_path),
-            "isochrone_plot": str(isochrone_path),
+            "posterior_plot": str(posterior_path) if run_config.save_fit_plots else None,
+            "isochrone_plot": str(isochrone_path) if run_config.save_fit_plots else None,
+            "posterior_samples_npz": str(posterior_samples_path) if run_config.save_posterior_samples else None,
+            "sampler_diagnostics_json": str(diagnostics_path) if run_config.save_posterior_samples else None,
+            "posterior_saved_samples": None,
+            **_best_fit_payload(np.array([], dtype=float), None),
             "mass_members_observed": None,
             "mass_cluster_imf_corrected": None,
             "mass_cluster_imf_binary_corrected": None,
@@ -448,12 +606,22 @@ def _init_worker(
     global _WORKER_CLUSTER_DATA, _WORKER_CLUSTER_METADATA, _WORKER_EXTINCTION_PRIOR, _WORKER_RUN_CONFIG, _WORKER_OUTPUT_ROOT
     _WORKER_CLUSTER_DATA = cluster_data
     _WORKER_CLUSTER_METADATA = cluster_metadata
-    _WORKER_EXTINCTION_PRIOR = ExtinctionPrior(extinction_map_path)
     _WORKER_RUN_CONFIG = run_config
     _WORKER_OUTPUT_ROOT = Path(output_root)
+    if run_config.quiet_worker_output:
+        init_log = _WORKER_OUTPUT_ROOT / "worker_logs" / f"worker_init_{os.getpid()}.log"
+        init_log.parent.mkdir(parents=True, exist_ok=True)
+        with init_log.open("a", encoding="utf-8", buffering=1) as log_handle:
+            log_handle.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} | worker init pid={os.getpid()}\n")
+            with contextlib.redirect_stdout(log_handle), contextlib.redirect_stderr(log_handle):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("default")
+                    _WORKER_EXTINCTION_PRIOR = ExtinctionPrior(extinction_map_path)
+    else:
+        _WORKER_EXTINCTION_PRIOR = ExtinctionPrior(extinction_map_path)
 
 
-def _process_cluster(cluster_name: str) -> dict[str, Any]:
+def _process_cluster_uncaptured(cluster_name: str) -> dict[str, Any]:
     if _WORKER_EXTINCTION_PRIOR is None or _WORKER_RUN_CONFIG is None or _WORKER_OUTPUT_ROOT is None:
         raise RuntimeError("worker globals not initialized")
 
@@ -493,6 +661,29 @@ def _process_cluster(cluster_name: str) -> dict[str, Any]:
         "prior_total_count": descriptor.total_count,
     }
     payload.update(model_results)
+    return payload
+
+
+def _process_cluster(cluster_name: str) -> dict[str, Any]:
+    if _WORKER_RUN_CONFIG is None or _WORKER_OUTPUT_ROOT is None:
+        raise RuntimeError("worker globals not initialized")
+    if not _WORKER_RUN_CONFIG.quiet_worker_output:
+        return _process_cluster_uncaptured(cluster_name)
+
+    worker_log = _WORKER_OUTPUT_ROOT / "worker_logs" / f"{_slugify(cluster_name)}.log"
+    worker_log.parent.mkdir(parents=True, exist_ok=True)
+    with worker_log.open("a", encoding="utf-8", buffering=1) as log_handle:
+        log_handle.write(
+            "\n"
+            + "=" * 78
+            + "\n"
+            + f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {cluster_name}\n"
+        )
+        with contextlib.redirect_stdout(log_handle), contextlib.redirect_stderr(log_handle):
+            with warnings.catch_warnings():
+                warnings.simplefilter("default")
+                payload = _process_cluster_uncaptured(cluster_name)
+    payload["worker_log"] = str(worker_log)
     return payload
 
 
@@ -573,6 +764,7 @@ def _flatten_result(payload: dict[str, Any]) -> dict[str, Any]:
         "prior_valid_fraction": payload.get("prior_valid_fraction"),
         "prior_valid_count": payload.get("prior_valid_count"),
         "prior_total_count": payload.get("prior_total_count"),
+        "worker_log": payload.get("worker_log"),
     }
     for model_name in _payload_model_names(payload):
         model_payload = payload.get(model_name, {})
@@ -646,9 +838,22 @@ def _print_terminal_banner(
             f" | posterior_mass_draws={run_config.mass_n_draws}"
             f" | imf_draws={run_config.mass_n_imfs}"
             f" | output_prefix={run_config.mass_output_prefix}"
+            f" | mass_plots={run_config.save_mass_diagnostic_plots}"
         )
     else:
         lines.append("masses: legacy only")
+    lines.append(
+        "outputs:"
+        f" posterior_samples={run_config.save_posterior_samples}"
+        f" | posterior_sample_size={run_config.posterior_sample_size}"
+        f" | fit_plots={run_config.save_fit_plots}"
+    )
+    lines.append(
+        "terminal:"
+        f" quiet_worker_output={run_config.quiet_worker_output}"
+        f" | print_cluster_updates={run_config.print_cluster_updates}"
+        f" | worker_logs={output_root / 'worker_logs'}"
+    )
     lines.append("=" * 78)
     print("\n".join(lines), flush=True)
 
@@ -822,13 +1027,18 @@ def run_dual_model_refit(
             with tqdm(
                 total=len(all_cluster_names),
                 initial=completed_at_start,
-                desc="Chronos dual-model refit",
+                desc="Chronos",
                 unit="cluster",
                 dynamic_ncols=True,
                 file=sys.stdout,
                 mininterval=0.5,
                 leave=True,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}",
+                colour="cyan",
+                bar_format=(
+                    "{desc}: {percentage:3.0f}%|{bar:40}| "
+                    "{n_fmt}/{total_fmt} clusters "
+                    "[{elapsed} elapsed, {remaining} left, {rate_fmt}] {postfix}"
+                ),
             ) as progress:
                 progress.set_postfix_str(
                     _format_progress_postfix(
@@ -881,13 +1091,14 @@ def run_dual_model_refit(
                             swiggum_successes=swiggum_successes if run_config.include_swiggum_masses else None,
                         )
                     )
-                    _print_cluster_update(
-                        payload,
-                        done=progress.n,
-                        total=len(all_cluster_names),
-                        include_swiggum_masses=run_config.include_swiggum_masses,
-                        mass_output_prefix=run_config.mass_output_prefix,
-                    )
+                    if run_config.print_cluster_updates:
+                        _print_cluster_update(
+                            payload,
+                            done=progress.n,
+                            total=len(all_cluster_names),
+                            include_swiggum_masses=run_config.include_swiggum_masses,
+                            mass_output_prefix=run_config.mass_output_prefix,
+                        )
     except KeyboardInterrupt:
         _write_summary_csv(output_root, existing_results)
         raise
