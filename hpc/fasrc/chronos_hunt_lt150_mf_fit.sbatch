@@ -16,6 +16,8 @@ N_PROCESSES="${N_PROCESSES:-${SLURM_CPUS_PER_TASK:-8}}"
 OUTPUT_DIRNAME="${OUTPUT_DIRNAME:-}"
 SAMPLE_N_CLUSTERS="${SAMPLE_N_CLUSTERS:-}"
 SAMPLE_SEED="${SAMPLE_SEED:-}"
+CLUSTER_SHARD_COUNT="${CLUSTER_SHARD_COUNT:-}"
+CLUSTER_SHARD_INDEX="${CLUSTER_SHARD_INDEX:-${SLURM_ARRAY_TASK_ID:-}}"
 
 module purge
 module load python
@@ -47,6 +49,12 @@ if [[ -n "$SAMPLE_N_CLUSTERS" ]]; then
 fi
 if [[ -n "$SAMPLE_SEED" ]]; then
   PY_ARGS+=(--sample-seed "$SAMPLE_SEED")
+fi
+if [[ -n "$CLUSTER_SHARD_COUNT" ]]; then
+  PY_ARGS+=(--cluster-shard-count "$CLUSTER_SHARD_COUNT")
+fi
+if [[ -n "$CLUSTER_SHARD_INDEX" ]]; then
+  PY_ARGS+=(--cluster-shard-index "$CLUSTER_SHARD_INDEX")
 fi
 
 python -m workflows.run_chronos_hunt_lt150_mf_fit "${PY_ARGS[@]}" "$@"

@@ -923,7 +923,7 @@ def run_dual_model_refit(
     _print_stage(f"loading cluster catalog: {paths.inputs.cluster_catalog_csv}")
     df_clusters = pd.read_csv(paths.inputs.cluster_catalog_csv)
     _print_stage(f"loaded {len(df_clusters):,} cluster rows")
-    if clusters:
+    if clusters is not None:
         cluster_set = {str(name) for name in clusters}
         df_clusters = df_clusters.loc[df_clusters["name"].astype(str).isin(cluster_set)].copy()
         _print_stage(f"applied cluster subset: {len(df_clusters):,} clusters remain")
