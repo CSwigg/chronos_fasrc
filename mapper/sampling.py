@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
-import imf
-from astropy import units as u
-from scipy.integrate import quad
 
-
-_EXPECTED_MASS_CACHE: dict[tuple[str, float, float], float] = {}
+from chronos.utils.kroupa_imf import make_kroupa_cluster
 
 
 def make_cluster_compat(
@@ -18,59 +13,17 @@ def make_cluster_compat(
     mmin: float | None = None,
     mmax: float | None = None,
 ) -> np.ndarray:
-    """Compatibility wrapper for keflavich/imf across releases.
-
-    Newer `initial_mass_function` releases require numerical integration for the
-    broken-power-law Kroupa IMF. The package's public `make_cluster()` helper
-    still attempts the analytic path, so we reproduce the relevant random
-    sampling logic here while forcing `numerical=True` in the expected-mass
-    calculation.
-    """
+    """Sample a Kroupa IMF cluster without relying on the external ``imf`` package."""
+    if massfunc != "kroupa":
+        raise ValueError(f"Unsupported massfunc for local IMF sampler: {massfunc!r}")
     if sampling != "random":
         raise ValueError(f"Unsupported sampling mode for compatibility wrapper: {sampling!r}")
-
-    cluster_mass = u.Quantity(cluster_mass, u.M_sun).value
-    mfc = imf.get_massfunc(massfunc, mmin=mmin, mmax=mmax)
-    cache_key = (str(massfunc), float(mfc.mmin), float(mfc.mmax))
-    expected_mass = _EXPECTED_MASS_CACHE.get(cache_key)
-    if expected_mass is None:
-        expected_mass = float(
-            quad(lambda mass: float(mass) * float(mfc.distr.pdf(mass)), float(mfc.mmin), float(mfc.mmax))[0]
-        )
-        _EXPECTED_MASS_CACHE[cache_key] = expected_mass
-    if not np.isfinite(expected_mass) or expected_mass <= 0.0:
-        return np.array([], dtype=float)
-
-    mtot = 0.0
-    masses = np.array([], dtype=float)
-    while mtot < cluster_mass:
-        nsamp = int(np.ceil((cluster_mass - mtot) / expected_mass))
-        nsamp = max(nsamp, 1)
-        new_masses = np.asarray(mfc.distr.rvs(nsamp), dtype=float)
-        masses = np.concatenate([masses, new_masses])
-        mtot = float(np.sum(masses))
-        if mtot < cluster_mass:
-            continue
-
-        cumulative = np.cumsum(masses)
-        if stop_criterion == "nearest":
-            last_index = int(np.argmin(np.abs(cumulative - cluster_mass))) + 1
-        elif stop_criterion == "before":
-            last_index = int(np.argmax(cumulative > cluster_mass))
-        elif stop_criterion == "after":
-            last_index = int(np.argmax(cumulative > cluster_mass)) + 1
-        elif stop_criterion == "sorted":
-            masses = np.sort(masses)
-            if np.abs(np.sum(masses[:-1]) - cluster_mass) < np.abs(np.sum(masses) - cluster_mass):
-                last_index = len(masses) - 1
-            else:
-                last_index = len(masses)
-        else:
-            raise ValueError(f"Unsupported stop_criterion={stop_criterion!r}")
-        masses = masses[:last_index]
-        break
-
-    return np.asarray(masses, dtype=float)
+    return make_kroupa_cluster(
+        cluster_mass,
+        stop_criterion=stop_criterion,
+        mmin=mmin,
+        mmax=mmax,
+    )
 
 
 def sample_cluster_age_myr(
