@@ -1,0 +1,645 @@
+import numpy as np
+import scipy.stats
+from scipy.integrate import quad, cumulative_trapezoid
+from scipy.interpolate import PchipInterpolator
+from scipy.special import expn
+
+
+class Distribution:
+    """
+    Class establishing the statistical distribution
+    underlying an IMF. Intended for subclassing.
+    """
+
+    def __init__(self):
+        self.m1 = 0  # edges of the support of the pdf
+        self.m2 = np.inf
+        pass
+
+    def pdf(self, x):
+        """ 
+        Probability density function
+        """
+        pass
+
+    def cdf(self, x):
+        """ 
+        Cumulative distribution function 
+        """
+        pass
+
+    def ppf(self, x):
+        """
+        Percent-point function (i.e. inverse CDF)
+        """
+        pass
+
+    def rvs(self, N):
+        """
+        Generate N random samples from the distribution
+        """
+        pass
+
+
+class LogNormal(Distribution):
+    """
+    Defines a log-normal distribution: 
+
+    .. math:: 
+       {\\rm PDF} \\propto \\frac{1}{x} * \\exp \\left[ -\\frac{1}{2} \\times \\left(\\frac{\\log(x)-\\log(\\mu)}{\\sigma} \\right)^2 \\right].
+
+    ``m1`` and ``m2`` are set at 0 and :math:`\\infty` and cannot be changed.
+
+    Parameters
+    ----------
+    mu: float
+        Lognormal "mean" parameter; log(mu) is the mean of the
+        log of the distribution
+    sig: float
+        Lognormal "width" parameter; log(sig) is the stdev of 
+        the log of the distribution
+    """
+
+    def __init__(self, mu, sig):
+        self.m1 = 0
+        self.m2 = np.inf
+        self.d = scipy.stats.lognorm(s=sig, scale=mu)
+
+    def pdf(self, x):
+        return self.d.pdf(x)
+
+    def cdf(self, x):
+        return self.d.cdf(x)
+
+    def ppf(self, x):
+        return self.d.ppf(x)
+
+    def rvs(self, N):
+        return self.d.rvs(N)
+
+
+class TruncatedLogNormal:
+    """
+    Log-normal distribution truncated in the interval [m1, m2].
+    """
+
+    def __init__(self, mu, sig, m1, m2):
+        self.m1 = m1
+        self.m2 = m2
+        self.d = scipy.stats.lognorm(s=sig, scale=mu)
+        self.norm = self.d.cdf(self.m2) - self.d.cdf(self.m1)
+
+    def pdf(self, x):
+        return self.d.pdf(x) * (x >= self.m1) * (x <= self.m2) / self.norm
+
+    def cdf(self, x):
+        return (self.d.cdf(np.clip(x, self.m1, self.m2)) -
+                self.d.cdf(self.m1)) / self.norm
+
+    def ppf(self, x):
+        x_ = np.asarray(x)
+        cut1 = self.d.cdf(self.m1)
+        cut2 = self.d.cdf(self.m2)
+        ret = self.d.ppf(x_ * (cut2 - cut1) + cut1)
+        ret = np.asarray(ret)
+        ret[(x_ < 0) | (x_ > 1)] = np.nan
+        return ret
+
+    def rvs(self, N):
+        x = np.random.uniform(0, 1, size=N)
+        return self.ppf(x)
+
+
+class PowerLaw(Distribution):
+    """
+    Power law over an interval [m1, m2].
+
+    Parameters
+    ----------
+    slope: float
+        Slope of the power law
+    """
+
+    def __init__(self, slope, m1, m2):
+        self.slope = slope
+        self.m1 = float(m1)
+        self.m2 = float(m2)
+        assert (m1 < m2)
+        assert (m1 > 0)
+        assert (m1 != -1)
+
+    def pdf(self, x):
+        if self.slope == -1:
+            return (x**self.slope / (np.log(self.m2 / self.m1)) *
+                    (x >= self.m1) * (x <= self.m2))
+        else:
+            return x**self.slope * (self.slope + 1) / (
+                self.m2**(self.slope + 1) -
+                self.m1**(self.slope + 1)) * (x >= self.m1) * (x <= self.m2)
+
+    def cdf(self, x):
+        if self.slope == -1:
+            raise RuntimeError('Not implemented')
+        else:
+            return (np.clip(x, self.m1, self.m2)**(self.slope + 1) -
+                    (self.m1**(self.slope + 1))) / (self.m2**(self.slope + 1) -
+                                                    self.m1**(self.slope + 1))
+
+    def ppf(self, x):
+        x_ = np.asarray(x)
+        if self.slope == -1:
+            ret = np.exp(x_ * np.log(self.m2 / self.m1)) * self.m1
+        else:
+            ret = (x_ *
+                   (self.m2**(self.slope + 1) - self.m1**(self.slope + 1)) +
+                   self.m1**(self.slope + 1))**(1. / (self.slope + 1))
+        ret = np.asarray(ret)
+        ret[(x_ < 0) | (x_ > 1)] = np.nan
+        return ret
+
+    def rvs(self, N):
+        x = np.random.uniform(size=N)
+        return self.ppf(x)
+
+
+class BrokenPowerLaw:
+    """
+    Broken power law with different slopes. Parameterized through slopes
+    and break points; the first and last break point are the domain of
+    the function.
+
+    Parameters
+    ----------
+    slopes: list/array
+        Power law slopes for each segment.
+    breaks: list/array
+        Points/edges of powerlaw segments. Must be one larger 
+        than the list of slopes.
+    """
+
+    def __init__(self, slopes, breaks):
+        self.slopes = slopes
+        self.breaks = breaks
+        self._calcpows()
+        self._calcweights()
+
+    @property
+    def m1(self):
+        return self.breaks[0]
+
+    @m1.setter
+    def m1(self, value):
+        self.breaks[0] = value
+        self._calcpows()
+        self._calcweights()
+
+    @property
+    def m2(self):
+        return self.breaks[-1]
+
+    @m2.setter
+    def m2(self, value):
+        self.breaks[-1] = value
+        self._calcpows()
+        self._calcweights()
+
+    def _calcpows(self):
+        if not (len(self.slopes) == len(self.breaks) - 1):
+            raise ValueError(
+                'The length of array of slopes must be equal to length of ' +
+                'array of break points minus 1')
+        if not ((np.diff(self.breaks) > 0).all()):
+            raise ValueError('Power law break-points must be monotonic')
+        nsegm = len(self.slopes)
+        pows = []
+        for ii in range(nsegm):
+            pows.append(
+                PowerLaw(self.slopes[ii], self.breaks[ii],
+                         self.breaks[ii + 1]))
+        self.pows = pows
+        self.nsegm = nsegm
+
+    def _calcweights(self):
+        nsegm = len(self.slopes)
+        weights = [1]
+        for ii in range(1, nsegm):
+            rat = self.pows[ii].pdf(self.breaks[ii]) / self.pows[ii - 1].pdf(
+                self.breaks[ii])
+            weights.append(weights[-1] / rat)
+        weights = np.array(weights)
+        self.weights = weights / np.sum(weights)  # relative normalizations
+        self.nsegm = nsegm
+
+    def pdf(self, x):
+        x1 = np.asarray(x)
+        ret = np.atleast_1d(x1) * 0.
+        for ii in range(self.nsegm):
+            xind = (x1 < self.breaks[ii + 1]) & (x1 >= self.breaks[ii])
+            if xind.sum() > 0:
+                ret[xind] = self.weights[ii] * self.pows[ii].pdf(x1[xind])
+        return ret.reshape(x1.shape)
+
+    def cdf(self, x):
+        x1 = np.asarray(x)
+        ret = np.atleast_1d(x1) * 0.
+        cums = np.r_[[0], np.cumsum(self.weights)]
+        for ii in range(self.nsegm):
+            xind = (x1 < self.breaks[ii + 1]) & (x1 >= self.breaks[ii])
+            if np.any(xind):
+                ret[xind] = cums[ii] + self.weights[ii] * self.pows[ii].cdf(
+                    x1[xind])
+
+        xind = x1 >= self.breaks[-1]
+
+        if np.any(xind):
+            ret[xind] = 1
+
+        return ret.reshape(x1.shape)
+
+    def ppf(self, x):
+        x_ = np.asarray(x)
+        x1 = np.atleast_1d(x_)
+        edges = np.r_[[0], np.cumsum(self.weights)]
+        # edges of powerlaw in CDF scale from 0 to 1
+        pos = np.digitize(x1, edges)  # bin positions, 1 is the leftmost
+        pos = np.clip(pos, 1, self.nsegm)
+        #  we can get zeros here if input is corrupt
+        left = edges[pos - 1]
+        w = self.weights[pos - 1]
+        x2 = np.clip((x1 - left) / w, 0, 1)  # mapping to 0,1 on the segment
+
+        # must force float b/c int dtypes can result in truncation
+        ret = np.zeros_like(x1, dtype='float')
+        for ii in range(x_.size):
+            ret[ii] = self.pows[pos[ii] - 1].ppf(x2[ii])
+
+        isnan = (x1 < 0) | (x1 > 1)
+        if any(isnan):
+            ret[isnan] = np.nan
+        return ret.reshape(x_.shape)
+
+    def rvs(self, N):
+        Ns = np.random.multinomial(N, self.weights)
+        ret = []
+        for ii in range(self.nsegm):
+            if Ns[ii] > 0:
+                ret.append(self.pows[ii].rvs(Ns[ii]))
+        return np.concatenate(ret)
+
+
+class CutoffPowerLaw(PowerLaw):
+    """
+    Power law over the interval [m1, m2] with an exponential taper.
+
+    Parameters
+    ----------
+    mc: float
+        Characteristic mass for the cutoff
+    npts: int
+        Number of points at which to evaluate the CDF 
+        (in order to interpolate the PPF)
+    """
+
+    def __init__(self, slope, m1, m2, mc,
+                 npts=None):
+        super().__init__(slope, m1, m2)
+        self.mc = mc
+        self.npts = 200 if npts is None else npts
+
+    def pdf(self, x):
+        sup = super().pdf
+        func = lambda x: sup(x) * np.exp(-x / self.mc)
+        return func(x)
+
+    def cdf(self, x):
+        func = lambda x: -x**(1 + self.slope) * expn(-self.slope, x / self.mc)
+        low = func(self.m1)
+
+        norm = quad(self.pdf, self.m1, self.m2)[0]
+        return (func(x) - low) * norm / (func(self.m2) - func(self.m1))
+
+    def ppf(self, x):
+        points = np.geomspace(self.m1, self.m2, self.npts)
+        cdf = self.cdf(points)
+        interp = PchipInterpolator(cdf/max(cdf), points)
+        return interp(x, extrapolate=False)
+
+
+class ModifiedCutoffPowerLaw(PowerLaw):
+    """
+    Power law over the interval [m1, m2] with exponential 
+    tapering on both ends.
+
+    Parameters
+    ----------
+    mc1: float
+        Characteristic mass for the low-mass cutoff
+    mc2: float
+        Characteristic mass for the high-mass cutoff
+    npts: int
+        Number of points at which to evaluate the CDF
+        (in order to interpolate the PPF)
+    """
+
+    def __init__(self, slope, m1, m2,
+                 mc1, mc2,
+                 npts=None):
+        super().__init__(slope, m1, m2)
+        self.mc1 = mc1
+        self.mc2 = mc2
+        self.npts = 200 if npts is None else npts
+
+    def pdf(self, x):
+        sup = super().pdf
+        func = lambda x: sup(x) * np.exp(-self.mc1 / x) * np.exp(-x / self.mc2)
+        return func(x)
+
+    def cdf(self, x):
+        def integrate(x_):
+            ret = quad(self.pdf, self.m1, x_)[0]
+            return ret
+
+        return np.vectorize(integrate)(x)
+
+    def ppf(self, x):
+        points = np.geomspace(self.m1, self.m2, self.npts)
+        cdf = self.cdf(points)
+        interp = PchipInterpolator(cdf/max(cdf), points)
+        return interp(x, extrapolate=False)
+
+
+class KoenConvolvedPowerLaw(Distribution):
+    """
+    A power law in the interval [m1, m2] convolved with a 
+    normal distribution as described in `Koen/Kondlo (2009) 
+    <https://doi.org/10.1111/j.1365-2966.2009.14956.x>`_. 
+    This implementation calculates the PDF and CDF of the 
+    distribution at a set of points and interpolates 
+    between the results.
+
+    Parameters
+    ----------
+    gamma: float
+        Slope of the power law in log space
+    sigma: float
+        Width of the Gaussian to be convolved
+    npts: int
+        Number of points at which the distribution
+        will be evaluated
+    """
+
+    def __init__(self, m1, m2, gamma, sigma, npts=None):
+        self.m1 = m1
+        self.m2 = m2
+        self.gamma = gamma
+        self.sigma = sigma
+        if npts is None:
+            npts = 200
+
+        self.points = self._make_points(npts)
+        self._pdf = self._pre_integrate(False)
+        self._pdf_interpolator = PchipInterpolator(self.points, self._pdf)
+        self._cdf = self._pre_integrate(True)
+        self._cdf_interpolator = PchipInterpolator(self.points, self._cdf)
+        self._ppf_interpolator = PchipInterpolator(self._cdf, self.points)
+
+    def _make_points(self, n_pts):
+        # points to interpolate between when calling the distribution
+        infMax = ~np.isfinite(self.m2)
+        if infMax:
+            points = np.geomspace(self.m1, 1000*self.m1, n_pts-1)
+            points = np.append(points, np.inf)
+        else:
+            points = np.geomspace(self.m1, self.m2, n_pts)[:-1]
+            extras = np.linspace(self.m2-3*self.sigma, self.m2, 8)
+            ext_inds = np.searchsorted(points, extras, side='left')
+            points = np.append(points, extras[ext_inds == len(points)])
+        return points
+
+    def _mirror_steps(self):
+        # Sub-intervals for the integration to capture small changes at both ends
+        x = np.geomspace(self.m1, self.m2, 100)
+        mir_x = self.m2-(x[::-1]-self.m1)
+        dx = x[1:]-x[:-1]
+        cutoff = min(self.sigma, 1)  # set a ceiling dx of 1
+        break1 = np.searchsorted(dx, cutoff)
+        break2 = np.searchsorted(-dx[::-1], -cutoff)
+        xpt = x[break1]
+        mirxpt = mir_x[break2]
+        x1, x2 = min(xpt, mirxpt), max(xpt, mirxpt)
+        x = np.append(x[x < x1], np.linspace(x1, x2,
+                                             int((x2-x1)/cutoff)))
+        x = np.append(x, mir_x[mir_x > x2])
+        return x
+
+    def _integrand(self, x, y, integral_form):
+        '''
+        Implements equations (3) and (5) from KK09.
+        '''
+        if integral_form:
+            # equation 5
+            coef = (1 / (self.sigma * np.sqrt(2 * np.pi) * (
+                self.m1**-self.gamma - self.m2**-self.gamma)))
+            ret = ((self.m1**-self.gamma - x**-self.gamma) * np.exp(
+                (-1 / 2) * ((y - x) / self.sigma)**2))
+            return coef*ret
+        else:
+            # equation 3
+            coef = (self.gamma / ((self.sigma * np.sqrt(2 * np.pi)) *
+                                  ((self.m1**-self.gamma) - (self.m2**-self.gamma))))
+            ret = (x**-(self.gamma + 1)) * np.exp(-.5 * ((y - x) / self.sigma)**2)
+            return coef*ret
+
+    def _pre_integrate(self, integral_form):
+        """
+        Performs the integration necessary to calculate the PDF or CDF
+        """
+        steps = self._mirror_steps()
+        results = []
+        for pt in self.points:
+            chunks = []
+            for i in range(len(steps)-1):
+                l, u = steps[i], steps[i+1]
+                area = quad(self._integrand, l, u, args=(pt, integral_form))[0]
+                chunks.append(area)
+            if integral_form:
+                results.append(np.sum(chunks) +
+                               scipy.stats.norm.cdf((pt - self.m2) / self.sigma))
+            else:
+                results.append(np.sum(chunks))
+        results = np.array(results)
+        return results
+
+    def pdf(self, x):
+        ret = self._pdf_interpolator(x, extrapolate=False)
+        return ret
+
+    def cdf(self, x):
+        ret = self._cdf_interpolator(x, extrapolate=False)
+        return ret
+
+    def ppf(self, x):
+        ret = self._ppf_interpolator(x, extrapolate=False)
+        return ret
+
+    def rvs(self, N):
+        samp = np.random.uniform(min(self._cdf), max(self._cdf), size=N)
+        return self.ppf(samp)
+
+
+class PadoanTF(Distribution):
+    """
+    Manages the PDF/CDF for a `Padoan/Nordlund (2002) 
+    <https://doi.org/10.1086/341790>`_  turbulent fragmentation
+    IMF over the interval [m1, m2]. See documentation of the 
+    companion ``MassFunction`` for details on arguments.
+    """
+
+    def __init__(self, m1, m2,
+                 b, T0, n0, sigma,
+                 npts=None):
+
+        self.m1 = m1
+        self.m2 = m2
+        self.b = b
+        self.T0 = T0
+        self.n0 = n0
+        self.sigma = sigma
+        if npts is None:
+            npts = 200
+
+        self._points = np.geomspace(self.m1, self.m2, npts)
+
+        self._calculate()
+
+    def _calculate(self):
+        av_mj = 1.2 * (self.T0 / 10)**(3/2) * (self.n0 / 1e3)**(-1/2)
+        A = 2 * np.log(av_mj) + self.sigma**2 / 2
+
+        # Jeans mass distribution (derived in Padoan+ 1997)
+        # this is the linear form for the sake of integration
+        def p_mj(mj):
+            return av_mj**2 / mj**3 * scipy.stats.norm.pdf(np.log(mj),
+                                                           loc=A/2,
+                                                           scale=self.sigma/2)
+
+        def integrate(mass):
+            return quad(p_mj, 0, mass)[0]
+
+        base = self._points**(-3 / (4 - self.b)) * np.vectorize(integrate)(self._points)
+        pdf = base / self._points  # convert to dN/dm
+        pdf /= np.trapezoid(pdf, x=self._points)  # normalize
+        cdf = cumulative_trapezoid(pdf, self._points, initial=0)
+        zero_arg = np.argmin(np.diff(cdf))
+
+        self._pdf = PchipInterpolator(self._points, pdf)
+        self._cdf = PchipInterpolator(self._points, cdf)
+        self._ppf = PchipInterpolator(cdf, self._points)
+
+    def pdf(self, x):
+        return self._pdf(x, extrapolate=False)
+
+    def cdf(self, x):
+        return self._cdf(x, extrapolate=False)
+
+    def ppf(self, x):
+        return self._ppf(x, extrapolate=False)
+
+    def rvs(self, N):
+        samp = np.random.uniform(self.cdf(self.m1), self.cdf(self.m2), size=N)
+        return self.ppf(samp)
+
+
+class CompositeDistribution(Distribution):
+    """
+    A distribution that consists of several distributions
+    that continuously join together.
+
+    Parameters
+    ----------
+    distrs: list of Distributions
+        The list of distributions. Their supports must not overlap
+        and not have any gaps.
+
+    Example
+    -------
+    .. code-block:: python
+
+       dd = distributions.CompositeDistribution([
+         distributions.TruncatedLogNormal(0.3,0.3,0.08,1),
+         distributions.PowerLaw(-2.55,1,np.inf)])
+       dd.pdf(3)
+
+    """
+
+    def __init__(self, distrs):
+        nsegm = len(distrs)
+        self.distrs = distrs
+        weights = [1]
+        breaks = [_.m1 for _ in self.distrs] + [self.distrs[-1].m2]
+
+        self.m1 = breaks[0]  # leftmost edge
+        self.m2 = breaks[-1]  # rightmost edge
+
+        # check that edges of intervals match
+        for ii in range(1, nsegm):
+            assert (distrs[ii].m1 == distrs[ii - 1].m2)
+
+        for ii in range(1, nsegm):
+            rat = distrs[ii].pdf(breaks[ii]) / distrs[ii - 1].pdf(breaks[ii])
+            # relative normalization of next pdf to the previous one so they
+            # join without a break
+            weights.append(weights[-1] / rat)
+        weights = np.array(weights)
+        self.breaks = breaks
+        self.weights = weights / np.sum(weights)
+        # these are relative weights  of each pdf
+        self.nsegm = nsegm
+
+    def pdf(self, x):
+        x1 = np.asarray(x)
+        ret = np.atleast_1d(x1 * 0.)
+        for ii in range(self.nsegm):
+            xind = (x1 < self.breaks[ii + 1]) & (x1 >= self.breaks[ii])
+            if xind.sum() > 0:
+                ret[xind] = self.weights[ii] * self.distrs[ii].pdf(x1[xind])
+        return ret.reshape(x1.shape)
+
+    def cdf(self, x):
+        x1 = np.asarray(x)
+        ret = np.atleast_1d(x1 * 0.)
+        cums = np.r_[[0], np.cumsum(self.weights)]
+        for ii in range(self.nsegm):
+            xind = (x1 < self.breaks[ii + 1]) & (x1 >= self.breaks[ii])
+            if xind.sum() > 0:
+                ret[xind] = cums[ii] + self.weights[ii] * self.distrs[ii].cdf(
+                    x1[xind])
+        xind = x1 >= self.breaks[-1]
+        if xind.sum():
+            ret[xind] = 1
+        return ret.reshape(x1.shape)
+
+    def ppf(self, x):
+        x_ = np.asarray(x)
+        x1 = np.atleast_1d(x_)
+        edges = np.r_[[0], np.cumsum(self.weights)]
+        pos = np.digitize(x1, edges)
+        pos = np.clip(pos, 1, self.nsegm)  # if input is <0 or >1
+        left = edges[pos - 1]
+        w = self.weights[pos - 1]
+        x2 = np.clip((x1 - left) / w, 0, 1)  # mapping to 0,1 on the segment
+        ret = np.zeros_like(x1)
+        for ii in range(x_.size):
+            ret[ii] = self.distrs[pos[ii] - 1].ppf(x2[ii])
+        ret[(x1 < 0) | (x1 > 1)] = np.nan
+        return ret.reshape(x_.shape)
+
+    def rvs(self, N):
+        Ns = np.random.multinomial(N, self.weights)
+        ret = []
+        for ii in range(self.nsegm):
+            if Ns[ii] > 0:
+                ret.append(self.distrs[ii].rvs(Ns[ii]))
+        ret = np.concatenate(ret)
+        ret = np.random.permutation(ret)  # permutation
+        return ret

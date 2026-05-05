@@ -12,10 +12,11 @@ from astropy.coordinates import SkyCoord
 import matplotlib
 import numpy as np
 import pandas as pd
+from scipy.integrate import quad
 
 from chronos.run_chronos.pipeline import ChronosFitConfig, configure_cluster_fitter
 from chronos.utils.ClusterMass import MassFitter
-from chronos.utils.kroupa_imf import kroupa_mass_integral, kroupa_number_integral
+from chronos.vendor import imf as vendored_imf
 from mapper.sampling import make_cluster_compat
 
 
@@ -844,9 +845,10 @@ def _fit_kroupa_amplitude(
     widths = np.diff(bin_edges)
     observed_density = counts / widths
 
+    mass_function = vendored_imf.get_massfunc("kroupa", mmin=0.03, mmax=float(np.max(masses)))
     model_density = []
     for lo, hi, width in zip(bin_edges[:-1], bin_edges[1:], widths):
-        integral = kroupa_number_integral(float(lo), float(hi), mmin=0.03, mmax=float(np.max(masses)))
+        integral = quad(lambda mass: float(mass_function.distr.pdf(mass)), float(lo), float(hi))[0]
         model_density.append(float(integral / width))
     model_density_arr = np.asarray(model_density, dtype=float)
     amplitude = float(np.sum(observed_density * model_density_arr) / np.sum(model_density_arr**2))
@@ -854,7 +856,12 @@ def _fit_kroupa_amplitude(
 
 
 def _integrated_kroupa_mass(amplitude: float, *, max_mass: float) -> float:
-    total_mass = kroupa_mass_integral(mmin=0.03, mmax=float(max_mass))
+    mass_function = vendored_imf.get_massfunc("kroupa", mmin=0.03, mmax=float(max_mass))
+    total_mass = quad(
+        lambda mass: float(mass) * float(mass_function.distr.pdf(mass)),
+        float(mass_function.mmin),
+        float(mass_function.mmax),
+    )[0]
     return float(amplitude * total_mass)
 
 
@@ -1205,8 +1212,17 @@ def estimate_legacy_imf_masses(
     def _imf_fraction_fallback(observed_masses: np.ndarray) -> float | None:
         min_mass = float(np.nanmin(observed_masses))
         min_mass = max(min_mass, 0.05)
-        total_mass = kroupa_mass_integral(mmin=0.03, mmax=120.0)
-        observed_fraction_mass = kroupa_mass_integral(min_mass, 120.0, mmin=0.03, mmax=120.0)
+        mfc = vendored_imf.get_massfunc("kroupa", mmin=0.03, mmax=120.0)
+        total_mass = quad(
+            lambda mass: float(mass) * float(mfc.distr.pdf(mass)),
+            float(mfc.mmin),
+            float(mfc.mmax),
+        )[0]
+        observed_fraction_mass = quad(
+            lambda mass: float(mass) * float(mfc.distr.pdf(mass)),
+            min_mass,
+            float(mfc.mmax),
+        )[0]
         if (
             not np.isfinite(total_mass)
             or not np.isfinite(observed_fraction_mass)
