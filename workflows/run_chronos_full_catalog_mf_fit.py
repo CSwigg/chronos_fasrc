@@ -96,6 +96,7 @@ def run(
     cluster_shard_index: int | None = None,
     age_min_myr: float = 1.0,
     age_max_myr: float = 1000.0,
+    age_prior: str = "linear",
     nwalkers: int = 96,
     burnin: int = 1000,
     nsteps: int = 10000,
@@ -145,6 +146,7 @@ def run(
         "requires_finite_positive_hunt_age": False,
         "rv_cut_enabled": False,
         "map_box_cut_enabled": False,
+        "age_prior": str(age_prior),
     }
     _write_selection(
         selected,
@@ -166,6 +168,7 @@ def run(
     )
     run_config = DualModelRunConfig(
         fit_config=fit_config,
+        age_prior=str(age_prior),
         include_swiggum_masses=True,
         mass_n_draws=int(mass_draws),
         mass_n_imfs=int(n_imfs),
@@ -195,6 +198,7 @@ def run(
         f" | models={','.join(models)}"
         f" | shard={shard_selection['cluster_shard_index']}/{shard_selection['cluster_shard_count']}"
         f" | age_range_myr={age_min_myr}-{age_max_myr}"
+        f" | age_prior={age_prior}"
         f" | nwalkers={nwalkers}"
         f" | burnin={burnin}"
         f" | nsteps={nsteps}"
@@ -234,6 +238,7 @@ def main() -> None:
     parser.add_argument("--cluster-shard-index", type=int, default=None)
     parser.add_argument("--age-min-myr", type=float, default=1.0)
     parser.add_argument("--age-max-myr", type=float, default=1000.0)
+    parser.add_argument("--age-prior", choices=("linear", "log"), default="linear")
     parser.add_argument("--nwalkers", type=int, default=96)
     parser.add_argument("--burnin", type=int, default=1000)
     parser.add_argument("--nsteps", type=int, default=10000)
@@ -258,6 +263,7 @@ def main() -> None:
         cluster_shard_index=args.cluster_shard_index,
         age_min_myr=args.age_min_myr,
         age_max_myr=args.age_max_myr,
+        age_prior=args.age_prior,
         nwalkers=args.nwalkers,
         burnin=args.burnin,
         nsteps=args.nsteps,

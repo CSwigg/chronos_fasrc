@@ -55,11 +55,15 @@ class ExtinctionPriorDescriptor:
     valid_fraction: float
     valid_count: int
     total_count: int
+    map_name: str
+    map_counts: dict[str, int]
+    floor_map_counts: dict[str, int]
 
 
 @dataclass(frozen=True)
 class DualModelRunConfig:
     fit_config: ChronosFitConfig = ChronosFitConfig()
+    age_prior: str = "log"
     sigma_av: float = 0.10
     binary_mass_scale: float = 1.25
     include_swiggum_masses: bool = False
@@ -144,6 +148,25 @@ def _build_extinction_descriptor(details: pd.DataFrame, sigma_av: float) -> Exti
     valid_av = pd.to_numeric(details.loc[details["is_valid"], "av"], errors="coerce").to_numpy(dtype=float)
     fallback_floor = pd.to_numeric(details["floor_av"], errors="coerce").to_numpy(dtype=float)
     valid_fraction = float(np.mean(details["is_valid"].to_numpy(dtype=bool))) if len(details) else 0.0
+    valid_map_names = (
+        details.loc[details["is_valid"], "map_name"].replace("", np.nan).dropna()
+        if "map_name" in details.columns
+        else pd.Series(dtype=object)
+    )
+    floor_map_names = (
+        details["floor_map_name"].replace("", np.nan).dropna()
+        if "floor_map_name" in details.columns
+        else pd.Series(dtype=object)
+    )
+    map_counts = {
+        str(map_name): int(count)
+        for map_name, count in valid_map_names.value_counts().sort_index().items()
+    }
+    floor_map_counts = {
+        str(map_name): int(count)
+        for map_name, count in floor_map_names.value_counts().sort_index().items()
+    }
+    map_name = "mixed" if len(map_counts) > 1 else next(iter(map_counts), "none")
     if len(details) and np.all(details["is_valid"].to_numpy(dtype=bool)):
         center = float(np.nanmedian(valid_av))
         return ExtinctionPriorDescriptor(
@@ -154,6 +177,9 @@ def _build_extinction_descriptor(details: pd.DataFrame, sigma_av: float) -> Exti
             valid_fraction=valid_fraction,
             valid_count=int(np.sum(np.isfinite(valid_av))),
             total_count=int(len(details)),
+            map_name=map_name,
+            map_counts=map_counts,
+            floor_map_counts=floor_map_counts,
         )
 
     floor_candidates = np.concatenate(
@@ -171,20 +197,29 @@ def _build_extinction_descriptor(details: pd.DataFrame, sigma_av: float) -> Exti
         valid_fraction=valid_fraction,
         valid_count=int(np.sum(np.isfinite(valid_av))),
         total_count=int(len(details)),
+        map_name=map_name if map_counts else "lower_limit",
+        map_counts=map_counts,
+        floor_map_counts=floor_map_counts,
     )
 
 
 class ChronosSkewCauchyBayesAVPrior(ChronosSkewCauchyBayes):
-    def __init__(self, *args, extinction_prior: ExtinctionPriorDescriptor, **kwargs):
+    def __init__(self, *args, extinction_prior: ExtinctionPriorDescriptor, age_prior: str = "log", **kwargs):
         super().__init__(*args, **kwargs)
         self.extinction_prior = extinction_prior
+        self.age_prior = str(age_prior).strip().lower()
 
     def log_prior(self, theta):
         base = super().log_prior(theta)
         if not np.isfinite(base):
             return -np.inf
 
-        _, _, av, _, _ = theta
+        log_age, _, av, _, _ = theta
+        if self.age_prior in {"linear", "age", "linear_age"}:
+            base += float(log_age) * math.log(10.0)
+        elif self.age_prior not in {"log", "logage", "log_age"}:
+            raise ValueError(f"Unsupported age_prior={self.age_prior!r}")
+
         sigma = max(float(self.extinction_prior.sigma_av), 1e-6)
         if self.extinction_prior.mode == "gaussian":
             center = float(self.extinction_prior.center_av or 0.0)
@@ -200,10 +235,12 @@ def _configure_cluster_fitter(
     df_group: pd.DataFrame,
     fit_config: ChronosFitConfig,
     extinction_prior: ExtinctionPriorDescriptor,
+    age_prior: str,
 ) -> ChronosSkewCauchyBayesAVPrior:
     fitter = ChronosSkewCauchyBayesAVPrior(
         **fit_config.chronos_kwargs(data=df_group),
         extinction_prior=extinction_prior,
+        age_prior=age_prior,
     )
     fitter.set_fitting_kwargs(**fit_config.fitting_kwargs())
     fitter.set_bounds(**fit_config.bayes_bounds())
@@ -467,7 +504,12 @@ def _fit_single_model(
     diagnostics_path = model_output_root / "sampler_diagnostics" / f"{plot_slug}_{model_name}_diagnostics.json"
 
     try:
-        fitter = _configure_cluster_fitter(df_group=df_group, fit_config=fit_config, extinction_prior=descriptor)
+        fitter = _configure_cluster_fitter(
+            df_group=df_group,
+            fit_config=fit_config,
+            extinction_prior=descriptor,
+            age_prior=run_config.age_prior,
+        )
         sampler, best_fit, samples = fitter.fit_bayesian(**fit_config.sampler_kwargs())
         summary = summarize_skew_cauchy_samples(samples, hdi_prob=fit_config.summary_hdi_prob)
         _distances, masses, keep_mask = fitter.compute_fit_info(
@@ -600,6 +642,8 @@ def _init_worker(
     cluster_data: dict[str, pd.DataFrame],
     cluster_metadata: dict[str, dict[str, Any]],
     extinction_map_path: str,
+    bayestar2019_map_path: str | None,
+    decaps_map_path: str | None,
     output_root: str,
     run_config: DualModelRunConfig,
 ) -> None:
@@ -616,9 +660,17 @@ def _init_worker(
             with contextlib.redirect_stdout(log_handle), contextlib.redirect_stderr(log_handle):
                 with warnings.catch_warnings():
                     warnings.simplefilter("default")
-                    _WORKER_EXTINCTION_PRIOR = ExtinctionPrior(extinction_map_path)
+                    _WORKER_EXTINCTION_PRIOR = ExtinctionPrior(
+                        extinction_map_path,
+                        bayestar2019_map_fname=bayestar2019_map_path,
+                        decaps_map_fname=decaps_map_path,
+                    )
     else:
-        _WORKER_EXTINCTION_PRIOR = ExtinctionPrior(extinction_map_path)
+        _WORKER_EXTINCTION_PRIOR = ExtinctionPrior(
+            extinction_map_path,
+            bayestar2019_map_fname=bayestar2019_map_path,
+            decaps_map_fname=decaps_map_path,
+        )
 
 
 def _process_cluster_uncaptured(cluster_name: str) -> dict[str, Any]:
@@ -659,6 +711,10 @@ def _process_cluster_uncaptured(cluster_name: str) -> dict[str, Any]:
         "prior_valid_fraction": descriptor.valid_fraction,
         "prior_valid_count": descriptor.valid_count,
         "prior_total_count": descriptor.total_count,
+        "prior_map_name": descriptor.map_name,
+        "prior_map_counts": descriptor.map_counts,
+        "prior_floor_map_counts": descriptor.floor_map_counts,
+        "age_prior": _WORKER_RUN_CONFIG.age_prior,
     }
     payload.update(model_results)
     return payload
@@ -764,6 +820,10 @@ def _flatten_result(payload: dict[str, Any]) -> dict[str, Any]:
         "prior_valid_fraction": payload.get("prior_valid_fraction"),
         "prior_valid_count": payload.get("prior_valid_count"),
         "prior_total_count": payload.get("prior_total_count"),
+        "prior_map_name": payload.get("prior_map_name"),
+        "prior_map_counts": json.dumps(payload.get("prior_map_counts") or {}, sort_keys=True),
+        "prior_floor_map_counts": json.dumps(payload.get("prior_floor_map_counts") or {}, sort_keys=True),
+        "age_prior": payload.get("age_prior"),
         "worker_log": payload.get("worker_log"),
     }
     for model_name in _payload_model_names(payload):
@@ -829,6 +889,7 @@ def _print_terminal_banner(
         "Chronos Dual-Model Refit",
         f"output: {output_root}",
         f"models: {', '.join(run_config.model_names)}",
+        f"age_prior: {run_config.age_prior}",
         f"clusters: total={total_clusters} pending={pending_clusters} already_complete={completed_at_start}",
         f"workers: n_processes={n_processes} chunksize={chunksize}",
     ]
@@ -1019,6 +1080,8 @@ def run_dual_model_refit(
                 grouped_data,
                 cluster_metadata,
                 str(paths.inputs.extinction_healpix_fits),
+                str(paths.inputs.bayestar2019_h5) if paths.inputs.bayestar2019_h5 is not None else None,
+                str(paths.inputs.decaps_h5) if paths.inputs.decaps_h5 is not None else None,
                 str(output_root),
                 run_config,
             ),

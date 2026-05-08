@@ -19,6 +19,8 @@ class InputPaths:
     lifetime_tracks_csv: Path
     dust_xyz_fits: Path
     extinction_healpix_fits: Path
+    bayestar2019_h5: Path | None = None
+    decaps_h5: Path | None = None
     gaia_neighborhood_cache_dir: Path | None = None
     hunt_selection_cache_dir: Path | None = None
     mccallum_ne_fits: Path | None = None
@@ -145,6 +147,16 @@ def load_runtime_paths(config_path: str | Path | None = None) -> RuntimePaths:
         lifetime_tracks_csv=_resolve_path(inputs_raw["lifetime_tracks_csv"], base=base),
         dust_xyz_fits=_resolve_path(inputs_raw["dust_xyz_fits"], base=base),
         extinction_healpix_fits=_resolve_path(inputs_raw["extinction_healpix_fits"], base=base),
+        bayestar2019_h5=(
+            _resolve_path(inputs_raw["bayestar2019_h5"], base=base)
+            if inputs_raw.get("bayestar2019_h5")
+            else None
+        ),
+        decaps_h5=(
+            _resolve_path(inputs_raw["decaps_h5"], base=base)
+            if inputs_raw.get("decaps_h5")
+            else None
+        ),
         gaia_neighborhood_cache_dir=(
             _resolve_path(inputs_raw["gaia_neighborhood_cache_dir"], base=base)
             if inputs_raw.get("gaia_neighborhood_cache_dir")

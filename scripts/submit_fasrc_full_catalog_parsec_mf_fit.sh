@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
-RUN_NAME="${RUN_NAME:-full_catalog_mf_fit_parsec_48shards_96w_1000b_10000s_20kpost_1000mass}"
+RUN_NAME="${RUN_NAME:-}"
 SHARD_COUNT="${SHARD_COUNT:-48}"
 PARTITION="${PARTITION:-sapphire}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-96}"
@@ -15,11 +15,20 @@ DRY_RUN="${DRY_RUN:-0}"
 NWALKERS="${NWALKERS:-96}"
 AGE_MIN_MYR="${AGE_MIN_MYR:-1}"
 AGE_MAX_MYR="${AGE_MAX_MYR:-1000}"
+AGE_PRIOR="${AGE_PRIOR:-linear}"
 BURNIN="${BURNIN:-1000}"
 NSTEPS="${NSTEPS:-10000}"
 MASS_DRAWS="${MASS_DRAWS:-1000}"
 N_IMFS="${N_IMFS:-1000}"
 POSTERIOR_SAMPLE_SIZE="${POSTERIOR_SAMPLE_SIZE:-20000}"
+
+if [[ -z "$RUN_NAME" ]]; then
+  posterior_label="$POSTERIOR_SAMPLE_SIZE"
+  if [[ "$POSTERIOR_SAMPLE_SIZE" == "20000" ]]; then
+    posterior_label="20k"
+  fi
+  RUN_NAME="full_catalog_mf_fit_parsec_${SHARD_COUNT}shards_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age"
+fi
 
 if [[ ! -f "$PROJECT_DIR/hpc/fasrc/chronos_full_catalog_mf_fit.sbatch" ]]; then
   echo "Could not find hpc/fasrc/chronos_full_catalog_mf_fit.sbatch under PROJECT_DIR=$PROJECT_DIR" >&2
@@ -55,6 +64,7 @@ array_cmd=(
   --models parsec
   --age-min-myr "$AGE_MIN_MYR"
   --age-max-myr "$AGE_MAX_MYR"
+  --age-prior "$AGE_PRIOR"
   --nwalkers "$NWALKERS"
   --burnin "$BURNIN"
   --nsteps "$NSTEPS"
