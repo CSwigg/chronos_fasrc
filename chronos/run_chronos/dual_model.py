@@ -16,6 +16,7 @@ from typing import Any
 
 warnings.filterwarnings("ignore", message=r"\s*ArviZ is undergoing a major refactor.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message="Configuration file not found:.*", module="dustmaps.config")
+warnings.filterwarnings("ignore", message="Overriding default configuration file with.*", module="dustmaps.config")
 
 import arviz as az
 import matplotlib
