@@ -342,6 +342,58 @@ def _write_selection(
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
+def _apply_selection_filters(
+    selected: pd.DataFrame,
+    *,
+    filter_hunt_age_max_myr: float | None,
+    filter_xy_half_width_pc: float | None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    before_count = int(len(selected))
+    filtered = selected.copy()
+    filter_summary: dict[str, Any] = {
+        "filter_hunt_age_max_myr": None,
+        "filter_xy_half_width_pc": None,
+        "n_clusters_before_filters": before_count,
+    }
+
+    mask = pd.Series(True, index=filtered.index)
+    if filter_hunt_age_max_myr is not None:
+        age_max = float(filter_hunt_age_max_myr)
+        ages = pd.to_numeric(filtered.get("priority_hunt_age_myr", filtered.get("age_myr")), errors="coerce")
+        age_mask = np.isfinite(ages) & (ages > 0.0) & (ages < age_max)
+        mask &= age_mask
+        filter_summary["filter_hunt_age_max_myr"] = age_max
+
+    if filter_xy_half_width_pc is not None:
+        half_width = float(filter_xy_half_width_pc)
+        if {"priority_x_pc", "priority_y_pc"}.issubset(filtered.columns):
+            x_values = pd.to_numeric(filtered["priority_x_pc"], errors="coerce")
+            y_values = pd.to_numeric(filtered["priority_y_pc"], errors="coerce")
+        else:
+            coord_cols = _coordinate_columns(filtered)
+            if coord_cols is None:
+                raise ValueError(
+                    "XY filtering requires position columns. Expected one of "
+                    "(x_2026,y_2026,z_2026), (x,y,z), or (x_new,y_new,z_new)."
+                )
+            x_values = pd.to_numeric(filtered[coord_cols[0]], errors="coerce")
+            y_values = pd.to_numeric(filtered[coord_cols[1]], errors="coerce")
+        xy_mask = (
+            np.isfinite(x_values)
+            & np.isfinite(y_values)
+            & (x_values > -half_width)
+            & (x_values < half_width)
+            & (y_values > -half_width)
+            & (y_values < half_width)
+        )
+        mask &= xy_mask
+        filter_summary["filter_xy_half_width_pc"] = half_width
+
+    filtered = filtered.loc[mask].reset_index(drop=True)
+    filter_summary["n_clusters_after_filters"] = int(len(filtered))
+    return filtered, filter_summary
+
+
 def run(
     *,
     config_path: str | Path | None = None,
@@ -358,6 +410,8 @@ def run(
     catalog_order: str = DEFAULT_CATALOG_ORDER,
     priority_hunt_age_max_myr: float = DEFAULT_PRIORITY_HUNT_AGE_MAX_MYR,
     priority_box_half_width_pc: float = DEFAULT_PRIORITY_BOX_HALF_WIDTH_PC,
+    filter_hunt_age_max_myr: float | None = None,
+    filter_xy_half_width_pc: float | None = None,
     age_min_myr: float = 1.0,
     age_max_myr: float = DEFAULT_AGE_MAX_MYR,
     age_prior: str = "linear",
@@ -391,6 +445,11 @@ def run(
         priority_hunt_age_max_myr=priority_hunt_age_max_myr,
         priority_box_half_width_pc=priority_box_half_width_pc,
     )
+    selected, filter_summary = _apply_selection_filters(
+        selected,
+        filter_hunt_age_max_myr=filter_hunt_age_max_myr,
+        filter_xy_half_width_pc=filter_xy_half_width_pc,
+    )
     if sample_n_clusters is not None:
         sample_n_clusters = int(sample_n_clusters)
         if sample_n_clusters <= 0:
@@ -413,10 +472,11 @@ def run(
         "sample_n_clusters": int(sample_n_clusters) if sample_n_clusters is not None else None,
         "sample_seed": int(sample_seed) if sample_n_clusters is not None else None,
         **ordering_summary,
+        **filter_summary,
         **shard_selection,
-        "requires_finite_positive_hunt_age": False,
+        "requires_finite_positive_hunt_age": filter_hunt_age_max_myr is not None,
         "rv_cut_enabled": False,
-        "map_box_cut_enabled": False,
+        "map_box_cut_enabled": filter_xy_half_width_pc is not None,
         "age_prior": str(age_prior),
     }
     _write_selection(
@@ -480,6 +540,8 @@ def run(
         f" | shard={shard_selection['cluster_shard_index']}/{shard_selection['cluster_shard_count']}"
         f" | shard_strategy={shard_selection['cluster_shard_strategy']}"
         f" | catalog_order={ordering_summary['catalog_order']}"
+        f" | filter_hunt_age_max_myr={filter_summary['filter_hunt_age_max_myr']}"
+        f" | filter_xy_half_width_pc={filter_summary['filter_xy_half_width_pc']}"
         f" | age_range_myr={age_min_myr}-{age_max_myr}"
         f" | age_prior={age_prior}"
         f" | nwalkers={nwalkers}"
@@ -527,6 +589,8 @@ def main() -> None:
     )
     parser.add_argument("--priority-hunt-age-max-myr", type=float, default=DEFAULT_PRIORITY_HUNT_AGE_MAX_MYR)
     parser.add_argument("--priority-box-half-width-pc", type=float, default=DEFAULT_PRIORITY_BOX_HALF_WIDTH_PC)
+    parser.add_argument("--filter-hunt-age-max-myr", type=float, default=None)
+    parser.add_argument("--filter-xy-half-width-pc", type=float, default=None)
     parser.add_argument("--age-min-myr", type=float, default=1.0)
     parser.add_argument("--age-max-myr", type=float, default=DEFAULT_AGE_MAX_MYR)
     parser.add_argument("--age-prior", choices=("linear", "log"), default="linear")
@@ -556,6 +620,8 @@ def main() -> None:
         catalog_order=args.catalog_order,
         priority_hunt_age_max_myr=args.priority_hunt_age_max_myr,
         priority_box_half_width_pc=args.priority_box_half_width_pc,
+        filter_hunt_age_max_myr=args.filter_hunt_age_max_myr,
+        filter_xy_half_width_pc=args.filter_xy_half_width_pc,
         age_min_myr=args.age_min_myr,
         age_max_myr=args.age_max_myr,
         age_prior=args.age_prior,

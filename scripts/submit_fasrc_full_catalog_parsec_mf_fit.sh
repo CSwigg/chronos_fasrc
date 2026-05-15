@@ -15,6 +15,8 @@ CATALOG_ORDER="${CATALOG_ORDER:-hunt_young_solar_box}"
 CLUSTER_SHARD_STRATEGY="${CLUSTER_SHARD_STRATEGY:-contiguous}"
 PRIORITY_HUNT_AGE_MAX_MYR="${PRIORITY_HUNT_AGE_MAX_MYR:-200}"
 PRIORITY_BOX_HALF_WIDTH_PC="${PRIORITY_BOX_HALF_WIDTH_PC:-1000}"
+FILTER_HUNT_AGE_MAX_MYR="${FILTER_HUNT_AGE_MAX_MYR:-}"
+FILTER_XY_HALF_WIDTH_PC="${FILTER_XY_HALF_WIDTH_PC:-}"
 
 NWALKERS="${NWALKERS:-46}"
 AGE_MIN_MYR="${AGE_MIN_MYR:-1}"
@@ -38,12 +40,24 @@ if [[ -z "$RUN_NAME" ]]; then
     box_half_label="${PRIORITY_BOX_HALF_WIDTH_PC//./p}"
     order_label="huntlt${priority_age_label}myr_boxhalf${box_half_label}pcfirst"
   fi
+  filter_label="allclusters"
+  if [[ -n "$FILTER_HUNT_AGE_MAX_MYR" || -n "$FILTER_XY_HALF_WIDTH_PC" ]]; then
+    filter_label="filtered"
+    if [[ -n "$FILTER_HUNT_AGE_MAX_MYR" ]]; then
+      filter_age_label="${FILTER_HUNT_AGE_MAX_MYR//./p}"
+      filter_label="${filter_label}_huntlt${filter_age_label}myr"
+    fi
+    if [[ -n "$FILTER_XY_HALF_WIDTH_PC" ]]; then
+      filter_xy_label="${FILTER_XY_HALF_WIDTH_PC//./p}"
+      filter_label="${filter_label}_xyhalf${filter_xy_label}pc"
+    fi
+  fi
   if [[ "$SHARD_COUNT" -eq 1 ]]; then
     shard_label="unsharded"
   else
     shard_label="${SHARD_COUNT}shards_${CLUSTER_SHARD_STRATEGY}shards"
   fi
-  RUN_NAME="full_catalog_mf_fit_parsec_${shard_label}_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age_agemax${age_max_label}myr_${order_label}"
+  RUN_NAME="full_catalog_mf_fit_parsec_${filter_label}_${shard_label}_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age_agemax${age_max_label}myr_${order_label}"
 fi
 
 if [[ ! -f "$PROJECT_DIR/hpc/fasrc/chronos_full_catalog_mf_fit.sbatch" ]]; then
@@ -96,6 +110,12 @@ array_cmd+=(
   --n-imfs "$N_IMFS"
   --posterior-sample-size "$POSTERIOR_SAMPLE_SIZE"
 )
+if [[ -n "$FILTER_HUNT_AGE_MAX_MYR" ]]; then
+  array_cmd+=(--filter-hunt-age-max-myr "$FILTER_HUNT_AGE_MAX_MYR")
+fi
+if [[ -n "$FILTER_XY_HALF_WIDTH_PC" ]]; then
+  array_cmd+=(--filter-xy-half-width-pc "$FILTER_XY_HALF_WIDTH_PC")
+fi
 
 if [[ "$SHARD_COUNT" -eq 1 ]]; then
   echo "Submitting Chronos full-catalog PARSEC job:"
