@@ -35,7 +35,12 @@ class ChronosBase:
             self.isochrone_handler = MIST(str(mist_dir), file_ending=('cmd', 'iso.cmd'))
         # Fail save is always PARSEC isochrones
         else:
-            self.isochrone_handler = PARSEC(str(data_path / 'parsec_files'), file_ending='dat')
+            parsec_dir = None
+            if isochrone_dirs is not None:
+                parsec_dir = isochrone_dirs.get("parsec")
+            if parsec_dir is None:
+                parsec_dir = data_path / 'parsec_files'
+            self.isochrone_handler = PARSEC(str(parsec_dir), file_ending='dat')
         self.distance_handler = Distance(use_grp=use_grp, data=data, **kwargs)
         self.bounds = self.auto_bounds()
         # self.kroupa_imf = imf.Kroupa()

@@ -20,16 +20,270 @@ from chronos.run_chronos.dual_model import DualModelRunConfig, run_dual_model_re
 from chronos.run_chronos.pipeline import ChronosFitConfig
 from workflows.config import load_runtime_paths
 from workflows.run_chronos_hunt_lt150_mf_fit import (
-    _apply_cluster_shard,
     _require_input_file,
     _resolve_mist_dir_for_models,
 )
 
 
-DEFAULT_OUTPUT_DIRNAME = "full_catalog_mf_fit_parsec_48shards_96w_1000b_10000s_20kpost_1000mass"
+DEFAULT_OUTPUT_DIRNAME = "full_catalog_mf_fit_parsec_unsharded_46w_100b_1000s_20kpost_1000mass_linearage_agemax12000myr"
+DEFAULT_CATALOG_ORDER = "name"
+DEFAULT_PRIORITY_HUNT_AGE_MAX_MYR = 200.0
+DEFAULT_PRIORITY_BOX_HALF_WIDTH_PC = 1000.0
+DEFAULT_AGE_MAX_MYR = 12000.0
 
 
-def select_full_catalog_clusters(*, config_path: str | Path | None = None) -> pd.DataFrame:
+def _coordinate_columns(clusters: pd.DataFrame) -> tuple[str, str, str] | None:
+    for columns in (("x_2026", "y_2026", "z_2026"), ("x", "y", "z"), ("x_new", "y_new", "z_new")):
+        if all(column in clusters.columns for column in columns):
+            return columns
+    return None
+
+
+def _add_velocity_catalog_sort_columns(
+    clusters: pd.DataFrame,
+    *,
+    config_path: str | Path | None,
+) -> pd.DataFrame:
+    paths = load_runtime_paths(config_path)
+    if not paths.inputs.velocity_catalog_csv.exists():
+        return clusters
+
+    velocity_header = pd.read_csv(paths.inputs.velocity_catalog_csv, nrows=0)
+    velocity_cols = ["name"]
+    for column in ("age_myr", "x_2026", "y_2026", "z_2026", "x", "y", "z"):
+        if column in velocity_header.columns:
+            velocity_cols.append(column)
+    if len(velocity_cols) == 1:
+        return clusters
+
+    velocity = pd.read_csv(paths.inputs.velocity_catalog_csv, usecols=velocity_cols)
+    velocity["name"] = velocity["name"].astype(str)
+    rename_map = {
+        column: f"{column}_velocity_catalog"
+        for column in velocity.columns
+        if column != "name" and column in clusters.columns
+    }
+    velocity = velocity.rename(columns=rename_map)
+    return clusters.merge(velocity, on="name", how="left")
+
+
+def _sort_full_catalog_clusters(
+    clusters: pd.DataFrame,
+    *,
+    catalog_order: str,
+    priority_hunt_age_max_myr: float,
+    priority_box_half_width_pc: float,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    ordered = clusters.copy()
+    ordered["__sort_name"] = ordered["name"].astype(str)
+
+    if catalog_order == "name":
+        ordered = ordered.sort_values("__sort_name").drop(columns=["__sort_name"]).reset_index(drop=True)
+        return ordered, {
+            "catalog_order": "name",
+            "priority_hunt_age_max_myr": None,
+            "priority_box_half_width_pc": None,
+            "priority_young_in_box_count": None,
+            "priority_young_total_count": None,
+        }
+
+    if catalog_order not in {"hunt_age", "hunt_young_solar_box"}:
+        raise ValueError(f"Unsupported catalog_order={catalog_order!r}")
+
+    age_source = "age_myr"
+    if age_source not in ordered.columns and "age_myr_velocity_catalog" in ordered.columns:
+        age_source = "age_myr_velocity_catalog"
+    ordered["priority_hunt_age_myr"] = pd.to_numeric(ordered.get(age_source), errors="coerce")
+    finite_age = np.isfinite(ordered["priority_hunt_age_myr"])
+    ordered["__finite_age_sort"] = np.where(finite_age, 0, 1)
+
+    if catalog_order == "hunt_age":
+        ordered["__age_sort"] = ordered["priority_hunt_age_myr"].fillna(np.inf)
+        ordered = (
+            ordered.sort_values(["__finite_age_sort", "__age_sort", "__sort_name"])
+            .drop(columns=["__sort_name", "__finite_age_sort", "__age_sort"])
+            .reset_index(drop=True)
+        )
+        return ordered, {
+            "catalog_order": "hunt_age",
+            "priority_hunt_age_max_myr": None,
+            "priority_box_half_width_pc": None,
+            "priority_young_in_box_count": None,
+            "priority_young_total_count": None,
+        }
+
+    coord_cols = _coordinate_columns(ordered)
+    if coord_cols is None:
+        raise ValueError(
+            "Catalog priority ordering requires position columns. Expected one of "
+            "(x_2026,y_2026,z_2026), (x,y,z), or (x_new,y_new,z_new)."
+        )
+    x_col, y_col, z_col = coord_cols
+    for column, output_column in ((x_col, "priority_x_pc"), (y_col, "priority_y_pc"), (z_col, "priority_z_pc")):
+        ordered[output_column] = pd.to_numeric(ordered[column], errors="coerce")
+
+    half_width = float(priority_box_half_width_pc)
+    age_max = float(priority_hunt_age_max_myr)
+    abs_xyz = ordered[["priority_x_pc", "priority_y_pc", "priority_z_pc"]].abs()
+    finite_xyz = np.isfinite(abs_xyz).all(axis=1)
+    outside_delta = (abs_xyz - half_width).clip(lower=0.0)
+    ordered["priority_outside_box_distance_pc"] = np.sqrt((outside_delta**2.0).sum(axis=1))
+    ordered["priority_radius_pc"] = np.sqrt((ordered[["priority_x_pc", "priority_y_pc", "priority_z_pc"]] ** 2.0).sum(axis=1))
+    ordered["priority_in_2kpc_box"] = finite_xyz & (abs_xyz <= half_width).all(axis=1)
+    ordered["priority_hunt_age_lt_200myr"] = finite_age & (ordered["priority_hunt_age_myr"] > 0.0) & (
+        ordered["priority_hunt_age_myr"] < age_max
+    )
+    ordered["priority_young_in_2kpc_box"] = ordered["priority_hunt_age_lt_200myr"] & ordered["priority_in_2kpc_box"]
+    ordered["__priority_bucket"] = np.select(
+        [
+            ordered["priority_young_in_2kpc_box"],
+            ordered["priority_hunt_age_lt_200myr"],
+            finite_age,
+        ],
+        [0, 1, 2],
+        default=3,
+    )
+    ordered["__distance_sort"] = ordered["priority_outside_box_distance_pc"].fillna(np.inf)
+    ordered["__radius_sort"] = ordered["priority_radius_pc"].fillna(np.inf)
+    ordered["__age_sort"] = ordered["priority_hunt_age_myr"].fillna(np.inf)
+    ordered = (
+        ordered.sort_values(
+            [
+                "__priority_bucket",
+                "__age_sort",
+                "__distance_sort",
+                "__radius_sort",
+                "__sort_name",
+            ]
+        )
+        .drop(
+            columns=[
+                "__sort_name",
+                "__finite_age_sort",
+                "__priority_bucket",
+                "__distance_sort",
+                "__radius_sort",
+                "__age_sort",
+            ]
+        )
+        .reset_index(drop=True)
+    )
+    return ordered, {
+        "catalog_order": "hunt_young_solar_box",
+        "priority_hunt_age_max_myr": age_max,
+        "priority_box_half_width_pc": half_width,
+        "priority_position_columns": list(coord_cols),
+        "priority_young_in_box_count": int(ordered["priority_young_in_2kpc_box"].sum()),
+        "priority_young_total_count": int(ordered["priority_hunt_age_lt_200myr"].sum()),
+        "priority_in_box_total_count": int(ordered["priority_in_2kpc_box"].sum()),
+        "priority_finite_age_count": int(finite_age.sum()),
+        "priority_finite_xyz_count": int(finite_xyz.sum()),
+    }
+
+
+def _apply_full_catalog_shard(
+    selected: pd.DataFrame,
+    *,
+    cluster_shard_count: int | None,
+    cluster_shard_index: int | None,
+    cluster_shard_strategy: str,
+) -> tuple[pd.DataFrame, dict[str, int | str | None]]:
+    if cluster_shard_count is None and cluster_shard_index is None:
+        return selected, {
+            "cluster_shard_count": None,
+            "cluster_shard_index": None,
+            "cluster_shard_strategy": None,
+            "n_clusters_before_shard": int(len(selected)),
+            "n_clusters_after_shard": int(len(selected)),
+        }
+
+    shard_count = 1 if cluster_shard_count is None else int(cluster_shard_count)
+    shard_index = 0 if cluster_shard_index is None else int(cluster_shard_index)
+    if shard_count <= 0:
+        raise ValueError("--cluster-shard-count must be positive when provided.")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError(
+            "--cluster-shard-index must satisfy "
+            f"0 <= index < count; got index={shard_index}, count={shard_count}."
+        )
+    if cluster_shard_strategy not in {"round_robin", "contiguous"}:
+        raise ValueError("--cluster-shard-strategy must be one of: round_robin, contiguous.")
+
+    before_count = int(len(selected))
+    if cluster_shard_strategy == "round_robin":
+        shard_mask = (np.arange(before_count) % shard_count) == shard_index
+        sharded = selected.loc[shard_mask].reset_index(drop=True)
+    else:
+        index_chunks = np.array_split(np.arange(before_count), shard_count)
+        shard_indices = index_chunks[shard_index]
+        sharded = selected.iloc[shard_indices].reset_index(drop=True)
+
+    return sharded, {
+        "cluster_shard_count": int(shard_count),
+        "cluster_shard_index": int(shard_index),
+        "cluster_shard_strategy": str(cluster_shard_strategy),
+        "n_clusters_before_shard": before_count,
+        "n_clusters_after_shard": int(len(sharded)),
+    }
+
+
+def _bundled_parsec_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "chronos" / "data" / "parsec_files"
+
+
+def _parsec_log_age_bounds(parsec_dir: Path) -> tuple[float, float]:
+    parsec_files = sorted(Path(parsec_dir).glob("*.dat"))
+    if not parsec_files:
+        raise FileNotFoundError(f"No PARSEC .dat files found under {parsec_dir}")
+
+    min_log_age = np.inf
+    max_log_age = -np.inf
+    for parsec_file in parsec_files:
+        with parsec_file.open("r", encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                try:
+                    log_age = float(parts[2])
+                except ValueError:
+                    continue
+                min_log_age = min(min_log_age, log_age)
+                max_log_age = max(max_log_age, log_age)
+
+    if not np.isfinite(min_log_age) or not np.isfinite(max_log_age):
+        raise ValueError(f"Could not read PARSEC logAge values from {parsec_dir}")
+    return float(min_log_age), float(max_log_age)
+
+
+def _validate_parsec_age_coverage(*, parsec_dir: Path, age_min_myr: float, age_max_myr: float) -> None:
+    min_log_age, max_log_age = _parsec_log_age_bounds(parsec_dir)
+    requested_min_log_age = float(np.log10(float(age_min_myr) * 1e6))
+    requested_max_log_age = float(np.log10(float(age_max_myr) * 1e6))
+    if requested_min_log_age < min_log_age or requested_max_log_age > max_log_age:
+        available_min_myr = 10**min_log_age / 1e6
+        available_max_myr = 10**max_log_age / 1e6
+        raise ValueError(
+            "Requested PARSEC age prior is outside the configured PARSEC isochrone grid. "
+            f"requested={age_min_myr:g}-{age_max_myr:g} Myr "
+            f"(logAge={requested_min_log_age:.3f}-{requested_max_log_age:.3f}); "
+            f"available={available_min_myr:g}-{available_max_myr:g} Myr "
+            f"(logAge={min_log_age:.3f}-{max_log_age:.3f}) from {parsec_dir}. "
+            "Install/configure PARSEC isochrones through 12 Gyr and set "
+            "inputs.parsec_isochrone_dir in configs/paths.toml before running."
+        )
+
+
+def select_full_catalog_clusters(
+    *,
+    config_path: str | Path | None = None,
+    catalog_order: str = DEFAULT_CATALOG_ORDER,
+    priority_hunt_age_max_myr: float = DEFAULT_PRIORITY_HUNT_AGE_MAX_MYR,
+    priority_box_half_width_pc: float = DEFAULT_PRIORITY_BOX_HALF_WIDTH_PC,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Select every named cluster in the configured Chronos cluster catalog."""
     paths = load_runtime_paths(config_path)
     clusters = pd.read_csv(paths.inputs.cluster_catalog_csv).copy()
@@ -37,7 +291,13 @@ def select_full_catalog_clusters(*, config_path: str | Path | None = None) -> pd
         raise ValueError(f"Cluster catalog is missing required 'name' column: {paths.inputs.cluster_catalog_csv}")
     clusters["name"] = clusters["name"].astype(str)
     clusters = clusters.loc[clusters["name"].str.strip() != ""].copy()
-    return clusters.sort_values("name").reset_index(drop=True)
+    clusters = _add_velocity_catalog_sort_columns(clusters, config_path=config_path)
+    return _sort_full_catalog_clusters(
+        clusters,
+        catalog_order=catalog_order,
+        priority_hunt_age_max_myr=priority_hunt_age_max_myr,
+        priority_box_half_width_pc=priority_box_half_width_pc,
+    )
 
 
 def _selection_stem(shard_selection: Mapping[str, int | None]) -> str:
@@ -94,12 +354,16 @@ def run(
     sample_seed: int = 20260508,
     cluster_shard_count: int | None = None,
     cluster_shard_index: int | None = None,
+    cluster_shard_strategy: str = "round_robin",
+    catalog_order: str = DEFAULT_CATALOG_ORDER,
+    priority_hunt_age_max_myr: float = DEFAULT_PRIORITY_HUNT_AGE_MAX_MYR,
+    priority_box_half_width_pc: float = DEFAULT_PRIORITY_BOX_HALF_WIDTH_PC,
     age_min_myr: float = 1.0,
-    age_max_myr: float = 1000.0,
+    age_max_myr: float = DEFAULT_AGE_MAX_MYR,
     age_prior: str = "linear",
-    nwalkers: int = 96,
-    burnin: int = 1000,
-    nsteps: int = 10000,
+    nwalkers: int = 46,
+    burnin: int = 100,
+    nsteps: int = 1000,
     mass_draws: int = 1000,
     n_imfs: int = 1000,
     posterior_sample_size: int = 20000,
@@ -121,7 +385,12 @@ def run(
         mist_isochrone_dir=mist_isochrone_dir,
     )
 
-    selected = select_full_catalog_clusters(config_path=config_path)
+    selected, ordering_summary = select_full_catalog_clusters(
+        config_path=config_path,
+        catalog_order=catalog_order,
+        priority_hunt_age_max_myr=priority_hunt_age_max_myr,
+        priority_box_half_width_pc=priority_box_half_width_pc,
+    )
     if sample_n_clusters is not None:
         sample_n_clusters = int(sample_n_clusters)
         if sample_n_clusters <= 0:
@@ -129,12 +398,13 @@ def run(
         if sample_n_clusters < len(selected):
             rng = np.random.default_rng(int(sample_seed))
             sampled_indices = np.sort(rng.choice(selected.index.to_numpy(), size=sample_n_clusters, replace=False))
-            selected = selected.loc[sampled_indices].sort_values("name").reset_index(drop=True)
+            selected = selected.loc[sampled_indices].reset_index(drop=True)
 
-    selected, shard_selection = _apply_cluster_shard(
+    selected, shard_selection = _apply_full_catalog_shard(
         selected,
         cluster_shard_count=cluster_shard_count,
         cluster_shard_index=cluster_shard_index,
+        cluster_shard_strategy=cluster_shard_strategy,
     )
 
     output_root = paths.outputs.chronos_dir / output_dirname
@@ -142,6 +412,7 @@ def run(
         "catalog": "full",
         "sample_n_clusters": int(sample_n_clusters) if sample_n_clusters is not None else None,
         "sample_seed": int(sample_seed) if sample_n_clusters is not None else None,
+        **ordering_summary,
         **shard_selection,
         "requires_finite_positive_hunt_age": False,
         "rv_cut_enabled": False,
@@ -156,8 +427,18 @@ def run(
     )
 
     isochrone_dirs: dict[str, str] = {}
+    if paths.inputs.parsec_isochrone_dir is not None:
+        isochrone_dirs["parsec"] = str(paths.inputs.parsec_isochrone_dir)
     if mist_dir is not None:
         isochrone_dirs["mist"] = str(mist_dir)
+
+    if "parsec" in {model.lower() for model in models}:
+        parsec_dir = Path(isochrone_dirs.get("parsec", str(_bundled_parsec_dir())))
+        _validate_parsec_age_coverage(
+            parsec_dir=parsec_dir,
+            age_min_myr=float(age_min_myr),
+            age_max_myr=float(age_max_myr),
+        )
 
     fit_config = ChronosFitConfig(
         age_range_myr=(float(age_min_myr), float(age_max_myr)),
@@ -197,6 +478,8 @@ def run(
         f" | clusters={len(selected)}"
         f" | models={','.join(models)}"
         f" | shard={shard_selection['cluster_shard_index']}/{shard_selection['cluster_shard_count']}"
+        f" | shard_strategy={shard_selection['cluster_shard_strategy']}"
+        f" | catalog_order={ordering_summary['catalog_order']}"
         f" | age_range_myr={age_min_myr}-{age_max_myr}"
         f" | age_prior={age_prior}"
         f" | nwalkers={nwalkers}"
@@ -236,12 +519,20 @@ def main() -> None:
     parser.add_argument("--sample-seed", type=int, default=20260508)
     parser.add_argument("--cluster-shard-count", type=int, default=None)
     parser.add_argument("--cluster-shard-index", type=int, default=None)
+    parser.add_argument("--cluster-shard-strategy", choices=("round_robin", "contiguous"), default="round_robin")
+    parser.add_argument(
+        "--catalog-order",
+        choices=("name", "hunt_age", "hunt_young_solar_box"),
+        default=DEFAULT_CATALOG_ORDER,
+    )
+    parser.add_argument("--priority-hunt-age-max-myr", type=float, default=DEFAULT_PRIORITY_HUNT_AGE_MAX_MYR)
+    parser.add_argument("--priority-box-half-width-pc", type=float, default=DEFAULT_PRIORITY_BOX_HALF_WIDTH_PC)
     parser.add_argument("--age-min-myr", type=float, default=1.0)
-    parser.add_argument("--age-max-myr", type=float, default=1000.0)
+    parser.add_argument("--age-max-myr", type=float, default=DEFAULT_AGE_MAX_MYR)
     parser.add_argument("--age-prior", choices=("linear", "log"), default="linear")
-    parser.add_argument("--nwalkers", type=int, default=96)
-    parser.add_argument("--burnin", type=int, default=1000)
-    parser.add_argument("--nsteps", type=int, default=10000)
+    parser.add_argument("--nwalkers", type=int, default=46)
+    parser.add_argument("--burnin", type=int, default=100)
+    parser.add_argument("--nsteps", type=int, default=1000)
     parser.add_argument("--mass-draws", type=int, default=1000)
     parser.add_argument("--n-imfs", type=int, default=1000)
     parser.add_argument("--posterior-sample-size", type=int, default=20000)
@@ -261,6 +552,10 @@ def main() -> None:
         sample_seed=args.sample_seed,
         cluster_shard_count=args.cluster_shard_count,
         cluster_shard_index=args.cluster_shard_index,
+        cluster_shard_strategy=args.cluster_shard_strategy,
+        catalog_order=args.catalog_order,
+        priority_hunt_age_max_myr=args.priority_hunt_age_max_myr,
+        priority_box_half_width_pc=args.priority_box_half_width_pc,
         age_min_myr=args.age_min_myr,
         age_max_myr=args.age_max_myr,
         age_prior=args.age_prior,

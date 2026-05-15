@@ -13,11 +13,15 @@ PROJECT_DIR="${PROJECT_DIR:-$SLURM_SUBMIT_DIR}"
 ENV_PREFIX="${ENV_PREFIX:-$HOME/chronos_fasrc/envs/chronos}"
 CONFIG_PATH="${CONFIG_PATH:-configs/paths.toml}"
 N_PROCESSES="${N_PROCESSES:-${SLURM_CPUS_PER_TASK:-96}}"
-OUTPUT_DIRNAME="${OUTPUT_DIRNAME:-full_catalog_mf_fit_parsec_48shards_96w_1000b_10000s_20kpost_1000mass}"
+OUTPUT_DIRNAME="${OUTPUT_DIRNAME:-full_catalog_mf_fit_parsec_unsharded_46w_100b_1000s_20kpost_1000mass_linearage_agemax12000myr}"
 SAMPLE_N_CLUSTERS="${SAMPLE_N_CLUSTERS:-}"
 SAMPLE_SEED="${SAMPLE_SEED:-}"
 CLUSTER_SHARD_COUNT="${CLUSTER_SHARD_COUNT:-}"
 CLUSTER_SHARD_INDEX="${CLUSTER_SHARD_INDEX:-${SLURM_ARRAY_TASK_ID:-}}"
+CLUSTER_SHARD_STRATEGY="${CLUSTER_SHARD_STRATEGY:-round_robin}"
+CATALOG_ORDER="${CATALOG_ORDER:-name}"
+PRIORITY_HUNT_AGE_MAX_MYR="${PRIORITY_HUNT_AGE_MAX_MYR:-200}"
+PRIORITY_BOX_HALF_WIDTH_PC="${PRIORITY_BOX_HALF_WIDTH_PC:-1000}"
 
 module purge
 module load python
@@ -54,5 +58,9 @@ fi
 if [[ -n "$CLUSTER_SHARD_INDEX" ]]; then
   PY_ARGS+=(--cluster-shard-index "$CLUSTER_SHARD_INDEX")
 fi
+PY_ARGS+=(--cluster-shard-strategy "$CLUSTER_SHARD_STRATEGY")
+PY_ARGS+=(--catalog-order "$CATALOG_ORDER")
+PY_ARGS+=(--priority-hunt-age-max-myr "$PRIORITY_HUNT_AGE_MAX_MYR")
+PY_ARGS+=(--priority-box-half-width-pc "$PRIORITY_BOX_HALF_WIDTH_PC")
 
 python -m workflows.run_chronos_full_catalog_mf_fit "${PY_ARGS[@]}" "$@"

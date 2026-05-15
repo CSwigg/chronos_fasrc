@@ -3,21 +3,25 @@ set -euo pipefail
 
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 RUN_NAME="${RUN_NAME:-}"
-SHARD_COUNT="${SHARD_COUNT:-48}"
+SHARD_COUNT="${SHARD_COUNT:-1}"
 PARTITION="${PARTITION:-sapphire}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-96}"
 MEM="${MEM:-512G}"
-TIME_LIMIT="${TIME_LIMIT:-0-09:00:00}"
+TIME_LIMIT="${TIME_LIMIT:-0-12:00:00}"
 ACCOUNT="${ACCOUNT:-}"
 ARRAY_CONCURRENCY="${ARRAY_CONCURRENCY:-}"
 DRY_RUN="${DRY_RUN:-0}"
+CATALOG_ORDER="${CATALOG_ORDER:-hunt_young_solar_box}"
+CLUSTER_SHARD_STRATEGY="${CLUSTER_SHARD_STRATEGY:-contiguous}"
+PRIORITY_HUNT_AGE_MAX_MYR="${PRIORITY_HUNT_AGE_MAX_MYR:-200}"
+PRIORITY_BOX_HALF_WIDTH_PC="${PRIORITY_BOX_HALF_WIDTH_PC:-1000}"
 
-NWALKERS="${NWALKERS:-96}"
+NWALKERS="${NWALKERS:-46}"
 AGE_MIN_MYR="${AGE_MIN_MYR:-1}"
-AGE_MAX_MYR="${AGE_MAX_MYR:-1000}"
+AGE_MAX_MYR="${AGE_MAX_MYR:-12000}"
 AGE_PRIOR="${AGE_PRIOR:-linear}"
-BURNIN="${BURNIN:-1000}"
-NSTEPS="${NSTEPS:-10000}"
+BURNIN="${BURNIN:-100}"
+NSTEPS="${NSTEPS:-1000}"
 MASS_DRAWS="${MASS_DRAWS:-1000}"
 N_IMFS="${N_IMFS:-1000}"
 POSTERIOR_SAMPLE_SIZE="${POSTERIOR_SAMPLE_SIZE:-20000}"
@@ -27,7 +31,19 @@ if [[ -z "$RUN_NAME" ]]; then
   if [[ "$POSTERIOR_SAMPLE_SIZE" == "20000" ]]; then
     posterior_label="20k"
   fi
-  RUN_NAME="full_catalog_mf_fit_parsec_${SHARD_COUNT}shards_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age"
+  age_max_label="${AGE_MAX_MYR//./p}"
+  order_label="$CATALOG_ORDER"
+  if [[ "$CATALOG_ORDER" == "hunt_young_solar_box" ]]; then
+    priority_age_label="${PRIORITY_HUNT_AGE_MAX_MYR//./p}"
+    box_half_label="${PRIORITY_BOX_HALF_WIDTH_PC//./p}"
+    order_label="huntlt${priority_age_label}myr_boxhalf${box_half_label}pcfirst"
+  fi
+  if [[ "$SHARD_COUNT" -eq 1 ]]; then
+    shard_label="unsharded"
+  else
+    shard_label="${SHARD_COUNT}shards_${CLUSTER_SHARD_STRATEGY}shards"
+  fi
+  RUN_NAME="full_catalog_mf_fit_parsec_${shard_label}_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age_agemax${age_max_label}myr_${order_label}"
 fi
 
 if [[ ! -f "$PROJECT_DIR/hpc/fasrc/chronos_full_catalog_mf_fit.sbatch" ]]; then
@@ -40,14 +56,18 @@ if [[ "$SHARD_COUNT" -le 0 ]]; then
   exit 1
 fi
 
-array_spec="0-$((SHARD_COUNT - 1))"
-if [[ -n "$ARRAY_CONCURRENCY" ]]; then
-  array_spec="${array_spec}%${ARRAY_CONCURRENCY}"
-fi
-
 account_args=()
 if [[ -n "$ACCOUNT" ]]; then
   account_args=(-A "$ACCOUNT")
+fi
+
+shard_export="N_PROCESSES=$CPUS_PER_TASK"
+if [[ "$SHARD_COUNT" -gt 1 ]]; then
+  array_spec="0-$((SHARD_COUNT - 1))"
+  if [[ -n "$ARRAY_CONCURRENCY" ]]; then
+    array_spec="${array_spec}%${ARRAY_CONCURRENCY}"
+  fi
+  shard_export="CLUSTER_SHARD_COUNT=$SHARD_COUNT,CLUSTER_SHARD_STRATEGY=$CLUSTER_SHARD_STRATEGY,$shard_export"
 fi
 
 array_cmd=(
@@ -58,8 +78,12 @@ array_cmd=(
   -c "$CPUS_PER_TASK"
   --mem "$MEM"
   -t "$TIME_LIMIT"
-  --array "$array_spec"
-  --export "ALL,PROJECT_DIR=$PROJECT_DIR,OUTPUT_DIRNAME=$RUN_NAME,CLUSTER_SHARD_COUNT=$SHARD_COUNT,N_PROCESSES=$CPUS_PER_TASK"
+)
+if [[ "$SHARD_COUNT" -gt 1 ]]; then
+  array_cmd+=(--array "$array_spec")
+fi
+array_cmd+=(
+  --export "ALL,PROJECT_DIR=$PROJECT_DIR,OUTPUT_DIRNAME=$RUN_NAME,$shard_export,CATALOG_ORDER=$CATALOG_ORDER,PRIORITY_HUNT_AGE_MAX_MYR=$PRIORITY_HUNT_AGE_MAX_MYR,PRIORITY_BOX_HALF_WIDTH_PC=$PRIORITY_BOX_HALF_WIDTH_PC"
   "$PROJECT_DIR/hpc/fasrc/chronos_full_catalog_mf_fit.sbatch"
   --models parsec
   --age-min-myr "$AGE_MIN_MYR"
@@ -73,7 +97,11 @@ array_cmd=(
   --posterior-sample-size "$POSTERIOR_SAMPLE_SIZE"
 )
 
-echo "Submitting Chronos full-catalog PARSEC array:"
+if [[ "$SHARD_COUNT" -eq 1 ]]; then
+  echo "Submitting Chronos full-catalog PARSEC job:"
+else
+  echo "Submitting Chronos full-catalog PARSEC array:"
+fi
 printf ' %q' "${array_cmd[@]}"
 echo
 
@@ -99,7 +127,11 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 array_job_id="$("${array_cmd[@]}")"
-echo "Array job: $array_job_id"
+if [[ "$SHARD_COUNT" -eq 1 ]]; then
+  echo "Chronos job: $array_job_id"
+else
+  echo "Array job: $array_job_id"
+fi
 
 finalize_cmd=(
   sbatch

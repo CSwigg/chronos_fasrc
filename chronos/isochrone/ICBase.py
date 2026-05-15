@@ -8,9 +8,10 @@ from chronos.utils.utils import resolve_duplicates
 
 
 # ----- Corrective factors for extinction correction -----
-corr_Gmag = 0.83627
-corr_BPmag = 1.08337
-corr_RPmag = 0.63439
+# Matched to CMD 3.7 Gaia EDR3 ODFNew constant-extinction output.
+corr_Gmag = 0.86100
+corr_BPmag = 1.06100
+corr_RPmag = 0.64750
 corr_bprp = corr_BPmag - corr_RPmag
 corr_grp = corr_Gmag - corr_RPmag
 # --------------------------------------------------------
@@ -64,7 +65,7 @@ class ICBase:
             # Swapaxes puts axis in front
             isochrone_coords = np.swapaxes(self.rgi[color]((feh, logAge, mass_grid_tiled)), 0, 1)
             # If the extinction array contains non-zero values
-            if not np.any(A_V):
+            if np.any(A_V):
                 mag_color, abs_mag_g = isochrone_coords.T
                 extincted_color, extincted_magg = self.apply_extinction_by_color(abs_mag_g, mag_color, A_V, color)
                 isochrone_coords = np.swapaxes(np.stack([extincted_color, extincted_magg]), 0, 2)

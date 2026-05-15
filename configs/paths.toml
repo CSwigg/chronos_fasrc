@@ -17,6 +17,7 @@ decaps_h5 = "inputs/dustmaps/decaps/decaps_mean.h5"
 gaia_neighborhood_cache_dir = ""
 hunt_selection_cache_dir = ""
 mccallum_ne_fits = ""
+parsec_isochrone_dir = "inputs/parsec_isochrones_hybrid_0p1myr_to13gyr"
 mist_isochrone_dir = "inputs/mist_isochrones"
 
 [surveys]

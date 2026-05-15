@@ -986,8 +986,11 @@ def run_dual_model_refit(
     df_clusters = pd.read_csv(paths.inputs.cluster_catalog_csv)
     _print_stage(f"loaded {len(df_clusters):,} cluster rows")
     if clusters is not None:
-        cluster_set = {str(name) for name in clusters}
+        cluster_order = {str(name): index for index, name in enumerate(clusters)}
+        cluster_set = set(cluster_order)
         df_clusters = df_clusters.loc[df_clusters["name"].astype(str).isin(cluster_set)].copy()
+        df_clusters["__chronos_run_order"] = df_clusters["name"].astype(str).map(cluster_order)
+        df_clusters = df_clusters.sort_values("__chronos_run_order").drop(columns=["__chronos_run_order"])
         _print_stage(f"applied cluster subset: {len(df_clusters):,} clusters remain")
 
     _print_stage("preparing Chronos photometry table")
@@ -1005,7 +1008,10 @@ def run_dual_model_refit(
 
     _print_stage("loading any existing checkpoints")
     existing_results = _load_existing_results(output_root)
-    all_cluster_names = list(grouped_data.keys())
+    if clusters is not None:
+        all_cluster_names = [str(name) for name in clusters if str(name) in grouped_data]
+    else:
+        all_cluster_names = list(grouped_data.keys())
     if force:
         pending_clusters = all_cluster_names
     else:

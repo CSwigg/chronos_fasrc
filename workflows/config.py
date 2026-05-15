@@ -24,6 +24,7 @@ class InputPaths:
     gaia_neighborhood_cache_dir: Path | None = None
     hunt_selection_cache_dir: Path | None = None
     mccallum_ne_fits: Path | None = None
+    parsec_isochrone_dir: Path | None = None
     mist_isochrone_dir: Path | None = None
 
 
@@ -170,6 +171,11 @@ def load_runtime_paths(config_path: str | Path | None = None) -> RuntimePaths:
         mccallum_ne_fits=(
             _resolve_path(inputs_raw["mccallum_ne_fits"], base=base)
             if inputs_raw.get("mccallum_ne_fits")
+            else None
+        ),
+        parsec_isochrone_dir=(
+            _resolve_path(inputs_raw["parsec_isochrone_dir"], base=base)
+            if inputs_raw.get("parsec_isochrone_dir")
             else None
         ),
         mist_isochrone_dir=(
