@@ -19,6 +19,7 @@ warnings.filterwarnings("ignore", message="Configuration file not found:.*", mod
 warnings.filterwarnings("ignore", message="Overriding default configuration file with.*", module="dustmaps.config")
 
 import arviz as az
+import emcee
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -227,11 +228,21 @@ class ChronosSkewCauchyBayesAVPrior(ChronosSkewCauchyBayes):
         self.age_prior = str(age_prior).strip().lower()
 
     def log_prior(self, theta):
-        base = super().log_prior(theta)
-        if not np.isfinite(base):
+        log_age, feh, av, skewness, scale = theta
+        if not np.all(np.isfinite(theta)):
             return -np.inf
 
-        log_age, _, av, _, _ = theta
+        log_age_range, feh_range, _av_range, skewness_range, scale_range = self.bounds
+        if not (
+            log_age_range[0] <= log_age <= log_age_range[1]
+            and feh_range[0] <= feh <= feh_range[1]
+            and av >= 0.0
+            and skewness_range[0] <= skewness <= skewness_range[1]
+            and scale_range[0] <= scale <= scale_range[1]
+        ):
+            return -np.inf
+
+        base = 0.0
         if self.age_prior in {"linear", "age", "linear_age"}:
             base += float(log_age) * math.log(10.0)
         elif self.age_prior not in {"log", "logage", "log_age"}:
@@ -246,6 +257,43 @@ class ChronosSkewCauchyBayesAVPrior(ChronosSkewCauchyBayes):
         if av >= floor:
             return base
         return base - 0.5 * ((av - floor) / sigma) ** 2
+
+    def _initial_av_range(self) -> tuple[float, float]:
+        sigma = max(float(self.extinction_prior.sigma_av), 1e-6)
+        if self.extinction_prior.mode == "gaussian":
+            center = _clean_float(self.extinction_prior.center_av) or 0.0
+            center = max(center, 0.0)
+            low = max(0.0, center - 3.0 * sigma)
+            high = max(center + 3.0 * sigma, center + 0.5, 1.0)
+            return low, high
+
+        floor = _clean_float(self.extinction_prior.floor_av) or 0.0
+        floor = max(floor, 0.0)
+        low = max(0.0, floor - 2.0 * sigma)
+        high = max(floor + 5.0 * sigma, floor + 1.0, 1.0)
+        return low, high
+
+    def fit_bayesian(self, nwalkers=20, nsteps=1000, burnin=100):
+        ndim = len(self.bounds)
+        init_bounds = list(self.bounds)
+        init_bounds[2] = self._initial_av_range()
+
+        pos = np.zeros((nwalkers, ndim))
+        for idx, (low, high) in enumerate(init_bounds):
+            if not (np.isfinite(low) and np.isfinite(high) and high > low):
+                raise ValueError(f"Cannot initialize sampler for non-finite bound {idx}: {(low, high)}")
+            pos[:, idx] = np.random.uniform(low, high, nwalkers)
+
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_probability)
+        if int(burnin) > 0:
+            pos, _prob, _state = sampler.run_mcmc(pos, int(burnin))
+            sampler.reset()
+        sampler.run_mcmc(pos, int(nsteps))
+
+        samples = sampler.get_chain(flat=True)
+        log_prob = sampler.get_log_prob(flat=True)
+        best_fit = samples[np.nanargmax(log_prob)]
+        return sampler, best_fit, samples
 
 
 def _configure_cluster_fitter(

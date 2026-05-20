@@ -28,7 +28,7 @@ class ChronosFitConfig:
     color_grp_column: str = "g-rp"
     age_range_myr: tuple[float, float] = (1.0, 500.0)
     feh_range: tuple[float, float] = (-1e-5, 1e-5)
-    av_range: tuple[float, float] = (0.0, 5.0)
+    av_range: tuple[float, float] = (0.0, np.inf)
     skewness_range: tuple[float, float] = (0.5, 0.99)
     scale_range: tuple[float, float] = (0.001, 0.1)
     fit_range: tuple[float, float] = (-np.inf, 10.0)

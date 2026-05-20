@@ -120,8 +120,8 @@ def _quality_flags(row: pd.Series, model: str) -> list[str]:
     if math.isfinite(av):
         if av <= 0.02:
             flags.append("av_at_lower_bound")
-        if av >= 4.98:
-            flags.append("av_at_upper_bound")
+        if av >= 5.0:
+            flags.append("high_av_review")
 
     valid_fraction = _as_float(row.get("prior_valid_fraction"))
     if math.isfinite(valid_fraction) and valid_fraction < 0.5:

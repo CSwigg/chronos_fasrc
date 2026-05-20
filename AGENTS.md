@@ -59,7 +59,8 @@ Do not casually change these settings; they define the comparable production run
 
 ## Dust Prior
 
-The `A_V` prior is dust-map informed and bounded by the Chronos sampler to `0 <= A_V <= 5`.
+The `A_V` prior is dust-map informed. The only hard sampler bound is `A_V >= 0`;
+there is intentionally no fixed upper `A_V` bound.
 
 Dust-map fallback order:
 
@@ -70,7 +71,7 @@ Dust-map fallback order:
 For each member star, the code uses the first map in that list that returns a finite value at the star's position and distance. The cluster-level prior is then built from member-star `A_V` values:
 
 - if all member stars have valid values: Gaussian around the median member `A_V`, with `sigma_Av = 0.10`
-- if some are outside map support: lower-limit style prior using valid/floor extinction estimates
+- if some are outside map support: lower-limit style prior using valid/floor extinction estimates; values above the inferred floor are allowed without a hard ceiling
 
 The results must preserve dust provenance through:
 
