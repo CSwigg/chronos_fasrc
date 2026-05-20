@@ -97,16 +97,16 @@ inputs/parsec_isochrones_hybrid_0p1myr_to13gyr/*.dat
 ```
 
 The intended PARSEC grid is generated with `scripts/download_parsec_isochrones.py`.
-It uses CMD 3.7 / PARSEC v1.2S / Gaia EDR3. As of May 2026 the live CMD 3.7
-service only accepts Gaia EDR3 with `photsys_version=odfnew`; the script records
-this in `manifest.json`.
+It uses CMD 3.7 / PARSEC v1.2S / Gaia EDR3 / YBC bolometric corrections.
+The live CMD form values needed for consistency with the older Chronos PARSEC
+grid are `photsys_version=YBC` and `track_colibri=parsec_CAF09_v1.2S_S_LMC_08_web`,
+which produces headers reading `PARSEC release v1.2S + COLIBRI S_37 + S_35 + PR16`.
 
-- one anchor isochrone at `0.1` Myr
-- linear `1` Myr spacing from `1` to `300` Myr
-- log spacing with `0.02` dex steps after `300` Myr
+- linear `0.1` Myr spacing from `0.1` to `200` Myr
+- log spacing with `0.02` dex steps after `200` Myr
 - an exact `13` Gyr endpoint
-- `382` actual unique ages across `21` CMD output files, about `333 MB`
-- current [M/H] groups matching the previous Chronos grid:
+- `2089` actual unique ages across `63` CMD output files, about `1.9 GB`
+- current [M/H] values matching the previous Chronos grid:
   `[-1.5, -1.3, -1.1, -0.9, -0.5, -0.3, -0.1, 0.1, 0.3]`
 
 Do not download a PARSEC extinction grid by default. Chronos loads unreddened

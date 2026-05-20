@@ -83,6 +83,9 @@ class ChronosPosteriorSummary:
     age_mode: float
     age_lo: float
     age_hi: float
+    age_median_lo: float
+    age_median: float
+    age_median_hi: float
     av_mode: float
     av_lo: float
     av_hi: float
@@ -171,6 +174,7 @@ def summarize_skew_cauchy_samples(
     log_age, _, av, skewness, scale = np.asarray(samples).T
     age_samples_myr = 10**log_age / 1e6
     age_lo, age_hi = az.hdi(age_samples_myr, hdi_prob=hdi_prob)
+    age_median_lo, age_median, age_median_hi = np.nanpercentile(age_samples_myr, [16, 50, 84])
     av_lo, av_hi = az.hdi(av, hdi_prob=hdi_prob)
     return ChronosPosteriorSummary(
         age_samples_myr=age_samples_myr,
@@ -180,6 +184,9 @@ def summarize_skew_cauchy_samples(
         age_mode=mode_reals(age_samples_myr, bins=100),
         age_lo=float(age_lo),
         age_hi=float(age_hi),
+        age_median_lo=float(age_median_lo),
+        age_median=float(age_median),
+        age_median_hi=float(age_median_hi),
         av_mode=mode_reals(av, bins=100),
         av_lo=float(av_lo),
         av_hi=float(av_hi),

@@ -145,6 +145,22 @@ def _clean_float(value: Any) -> float | None:
     return None
 
 
+def _age_mode_best_fit_diagnostics(age_mode: Any, best_fit_age_myr: Any) -> dict[str, float | None]:
+    mode = _clean_float(age_mode)
+    best = _clean_float(best_fit_age_myr)
+    if mode is None or best is None or mode <= 0.0 or best <= 0.0:
+        return {
+            "age_best_fit_minus_mode_myr": None,
+            "age_best_fit_over_mode_ratio": None,
+            "age_best_fit_minus_mode_dex": None,
+        }
+    return {
+        "age_best_fit_minus_mode_myr": best - mode,
+        "age_best_fit_over_mode_ratio": best / mode,
+        "age_best_fit_minus_mode_dex": math.log10(best) - math.log10(mode),
+    }
+
+
 def _build_extinction_descriptor(details: pd.DataFrame, sigma_av: float) -> ExtinctionPriorDescriptor:
     valid_av = pd.to_numeric(details.loc[details["is_valid"], "av"], errors="coerce").to_numpy(dtype=float)
     fallback_floor = pd.to_numeric(details["floor_av"], errors="coerce").to_numpy(dtype=float)
@@ -267,9 +283,9 @@ def _posterior_age_summary(
     return ChronosAgeSummary(
         name=str(cluster_name),
         age_myr=IntervalSummary(
-            p16=float(summary.age_lo),
-            p50=float(summary.age_mode),
-            p84=float(summary.age_hi),
+            p16=float(summary.age_median_lo),
+            p50=float(summary.age_median),
+            p84=float(summary.age_median_hi),
         ),
         av_mag=IntervalSummary(
             p16=float(summary.av_lo),
@@ -577,6 +593,12 @@ def _fit_single_model(
                 seed=_stable_seed(cluster_name, model_name, "posterior"),
             )
 
+        best_fit_outputs = _best_fit_payload(np.asarray(best_fit, dtype=float), None)
+        age_mode_best_fit_outputs = _age_mode_best_fit_diagnostics(
+            summary.age_mode,
+            best_fit_outputs.get("best_fit_age_myr"),
+        )
+
         if run_config.save_fit_plots:
             _save_posterior_plot(
                 samples=samples,
@@ -599,6 +621,9 @@ def _fit_single_model(
             "age_mode": summary.age_mode,
             "age_lo": summary.age_lo,
             "age_hi": summary.age_hi,
+            "age_median_lo": summary.age_median_lo,
+            "age_median": summary.age_median,
+            "age_median_hi": summary.age_median_hi,
             "av_mode": summary.av_mode,
             "av_lo": summary.av_lo,
             "av_hi": summary.av_hi,
@@ -606,6 +631,8 @@ def _fit_single_model(
             "isochrone_plot": str(isochrone_path) if run_config.save_fit_plots else None,
             **mass_outputs,
             **swiggum_outputs,
+            **best_fit_outputs,
+            **age_mode_best_fit_outputs,
             **posterior_outputs,
         }
     except Exception as exc:
@@ -623,6 +650,12 @@ def _fit_single_model(
             "age_mode": None,
             "age_lo": None,
             "age_hi": None,
+            "age_median_lo": None,
+            "age_median": None,
+            "age_median_hi": None,
+            "age_best_fit_minus_mode_myr": None,
+            "age_best_fit_over_mode_ratio": None,
+            "age_best_fit_minus_mode_dex": None,
             "av_mode": None,
             "av_lo": None,
             "av_hi": None,

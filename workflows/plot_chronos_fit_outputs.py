@@ -57,9 +57,12 @@ def _float_from_row(row: pd.Series, key: str) -> float:
 
 
 def _isochrone_dirs_for(paths) -> dict[str, str] | None:
-    if paths.inputs.mist_isochrone_dir is None:
-        return None
-    return {"mist": str(paths.inputs.mist_isochrone_dir)}
+    isochrone_dirs: dict[str, str] = {}
+    if paths.inputs.parsec_isochrone_dir is not None:
+        isochrone_dirs["parsec"] = str(paths.inputs.parsec_isochrone_dir)
+    if paths.inputs.mist_isochrone_dir is not None:
+        isochrone_dirs["mist"] = str(paths.inputs.mist_isochrone_dir)
+    return isochrone_dirs or None
 
 
 def plot_run(
@@ -89,6 +92,8 @@ def plot_run(
         results = results.head(int(max_clusters)).copy()
 
     grouped_data: dict[str, pd.DataFrame] = {}
+    fitter_cache: dict[str, object] = {}
+    plot_fit_config = ChronosFitConfig(isochrone_dirs=_isochrone_dirs_for(paths))
     if make_isochrone_plots:
         df_stars = pd.read_csv(paths.inputs.member_catalog_csv)
         df_clusters = pd.read_csv(paths.inputs.cluster_catalog_csv)
@@ -98,7 +103,6 @@ def plot_run(
             for cluster_name, group in fit_data.groupby("label", sort=False)
         }
 
-    isochrone_dirs = _isochrone_dirs_for(paths)
     completed = 0
     skipped = 0
     errors: list[str] = []
@@ -143,10 +147,19 @@ def plot_run(
                         errors.append(f"{cluster_name} {model_name} isochrone: missing member photometry")
                         continue
                     try:
-                        fitter = configure_cluster_fitter(
-                            df_group=df_group,
-                            fit_config=ChronosFitConfig(models=model_name, isochrone_dirs=isochrone_dirs),
-                        )
+                        fitter = fitter_cache.get(model_name)
+                        if fitter is None:
+                            fit_config = ChronosFitConfig(models=model_name, isochrone_dirs=plot_fit_config.isochrone_dirs)
+                            fitter = configure_cluster_fitter(df_group=df_group, fit_config=fit_config)
+                            fitter_cache[model_name] = fitter
+                        else:
+                            fitter.update_data(
+                                df_group,
+                                use_grp=plot_fit_config.use_grp,
+                                abs_Gmag_name=plot_fit_config.abs_gmag_column,
+                                color_bprp_name=plot_fit_config.color_bprp_column,
+                                color_grp_name=plot_fit_config.color_grp_column,
+                            )
                         _save_isochrone_plot(
                             fitter,
                             age_mode=_float_from_row(row, f"{model_name}_age_mode"),
