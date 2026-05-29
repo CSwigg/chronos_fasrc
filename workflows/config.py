@@ -26,6 +26,7 @@ class InputPaths:
     mccallum_ne_fits: Path | None = None
     parsec_isochrone_dir: Path | None = None
     mist_isochrone_dir: Path | None = None
+    baraffe_isochrone_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,11 @@ def load_runtime_paths(config_path: str | Path | None = None) -> RuntimePaths:
         mist_isochrone_dir=(
             _resolve_path(inputs_raw["mist_isochrone_dir"], base=base)
             if inputs_raw.get("mist_isochrone_dir")
+            else None
+        ),
+        baraffe_isochrone_dir=(
+            _resolve_path(inputs_raw["baraffe_isochrone_dir"], base=base)
+            if inputs_raw.get("baraffe_isochrone_dir")
             else None
         ),
     )

@@ -75,8 +75,8 @@ class Baraffe15(ICBase):
 
                 if line.startswith(self.colnames['age_start']):
                     line = re.sub(r'\t', ' ', line)  # remove tabs
-                    age = float(re.findall("\d+\.\d+", line)[0])
-                    logAge = np.round(np.log10(age * 10**9), decimals=2)
+                    age = float(re.findall(r"=\s*([0-9.Ee+-]+)", line)[0])
+                    logAge = np.log10(age * 10**9)
                     logAge_info.append(logAge)
                     # Save infos
                     if len(line_info) > 0:

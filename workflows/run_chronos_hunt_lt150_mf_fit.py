@@ -155,6 +155,34 @@ def _resolve_mist_dir_for_models(
     return mist_dir
 
 
+def _resolve_baraffe_dir_for_models(
+    *,
+    models: tuple[str, ...],
+    configured_baraffe_dir: Path | None,
+    baraffe_isochrone_dir: str | Path | None,
+) -> Path | None:
+    if not ({"baraffe", "bhac"} & {model.lower() for model in models}):
+        return None
+    baraffe_dir = (
+        Path(baraffe_isochrone_dir).expanduser().resolve()
+        if baraffe_isochrone_dir is not None
+        else configured_baraffe_dir
+    )
+    if baraffe_dir is None:
+        return None
+    if not baraffe_dir.exists():
+        raise FileNotFoundError(
+            "Baraffe/BHAC was requested, but the Baraffe Gaia directory is missing. "
+            f"Expected: {baraffe_dir}"
+        )
+    if not any(baraffe_dir.glob("*.GAIA")):
+        raise FileNotFoundError(
+            f"Baraffe/BHAC was requested, but no Gaia files were found in {baraffe_dir}. "
+            "Expected files ending in .GAIA."
+        )
+    return baraffe_dir
+
+
 def run(
     *,
     config_path: str | Path | None = None,
@@ -163,6 +191,7 @@ def run(
     models: tuple[str, ...] = ("parsec", "mist", "baraffe"),
     output_dirname: str = DEFAULT_OUTPUT_DIRNAME,
     mist_isochrone_dir: str | Path | None = None,
+    baraffe_isochrone_dir: str | Path | None = None,
     hunt_age_max_myr: float = 150.0,
     box_half_width_pc: float = 1500.0,
     min_n_rvs_2026: int | None = 3,
@@ -176,6 +205,7 @@ def run(
     mass_draws: int = 1000,
     n_imfs: int = 1000,
     posterior_sample_size: int = 20000,
+    age_prior: str = "log",
     save_fit_plots: bool = False,
     save_mass_diagnostic_plots: bool = False,
     quiet_worker_output: bool = True,
@@ -192,6 +222,11 @@ def run(
         models=tuple(models),
         configured_mist_dir=paths.inputs.mist_isochrone_dir,
         mist_isochrone_dir=mist_isochrone_dir,
+    )
+    baraffe_dir = _resolve_baraffe_dir_for_models(
+        models=tuple(models),
+        configured_baraffe_dir=paths.inputs.baraffe_isochrone_dir,
+        baraffe_isochrone_dir=baraffe_isochrone_dir,
     )
     selected = select_hunt_lt150_clean_map_clusters(
         config_path=config_path,
@@ -231,6 +266,8 @@ def run(
     isochrone_dirs: dict[str, str] = {}
     if mist_dir is not None:
         isochrone_dirs["mist"] = str(mist_dir)
+    if baraffe_dir is not None:
+        isochrone_dirs["baraffe"] = str(baraffe_dir)
 
     fit_config = ChronosFitConfig(
         age_range_myr=(1.0, 500.0),
@@ -241,6 +278,7 @@ def run(
     )
     run_config = DualModelRunConfig(
         fit_config=fit_config,
+        age_prior=str(age_prior),
         include_swiggum_masses=True,
         mass_n_draws=int(mass_draws),
         mass_n_imfs=int(n_imfs),
@@ -273,6 +311,7 @@ def run(
         f" | nwalkers={nwalkers}"
         f" | burnin={burnin}"
         f" | nsteps={nsteps}"
+        f" | age_prior={age_prior}"
         f" | posterior_sample_size={posterior_sample_size}"
         f" | mass_draws={mass_draws}"
         f" | n_imfs={n_imfs}"
@@ -303,6 +342,7 @@ def main() -> None:
     parser.add_argument("--models", nargs="+", default=("parsec", "mist", "baraffe"))
     parser.add_argument("--output-dirname", type=str, default=DEFAULT_OUTPUT_DIRNAME)
     parser.add_argument("--mist-isochrone-dir", type=str, default=None)
+    parser.add_argument("--baraffe-isochrone-dir", type=str, default=None)
     parser.add_argument("--hunt-age-max-myr", type=float, default=150.0)
     parser.add_argument("--box-half-width-pc", type=float, default=1500.0)
     parser.add_argument("--min-n-rvs-2026", type=int, default=3)
@@ -317,6 +357,7 @@ def main() -> None:
     parser.add_argument("--mass-draws", type=int, default=1000)
     parser.add_argument("--n-imfs", type=int, default=1000)
     parser.add_argument("--posterior-sample-size", type=int, default=20000)
+    parser.add_argument("--age-prior", choices=("linear", "log"), default="log")
     parser.add_argument("--save-fit-plots", action="store_true")
     parser.add_argument("--save-mass-diagnostic-plots", action="store_true")
     parser.add_argument("--show-worker-output", action="store_true")
@@ -329,6 +370,7 @@ def main() -> None:
         models=tuple(args.models),
         output_dirname=args.output_dirname,
         mist_isochrone_dir=args.mist_isochrone_dir,
+        baraffe_isochrone_dir=args.baraffe_isochrone_dir,
         hunt_age_max_myr=args.hunt_age_max_myr,
         box_half_width_pc=args.box_half_width_pc,
         min_n_rvs_2026=None if args.no_rv_cut else args.min_n_rvs_2026,
@@ -342,6 +384,7 @@ def main() -> None:
         mass_draws=args.mass_draws,
         n_imfs=args.n_imfs,
         posterior_sample_size=args.posterior_sample_size,
+        age_prior=args.age_prior,
         save_fit_plots=args.save_fit_plots,
         save_mass_diagnostic_plots=args.save_mass_diagnostic_plots,
         quiet_worker_output=not args.show_worker_output,

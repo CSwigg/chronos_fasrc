@@ -21,6 +21,7 @@ from chronos.run_chronos.pipeline import ChronosFitConfig
 from workflows.config import load_runtime_paths
 from workflows.run_chronos_hunt_lt150_mf_fit import (
     _require_input_file,
+    _resolve_baraffe_dir_for_models,
     _resolve_mist_dir_for_models,
 )
 
@@ -402,6 +403,7 @@ def run(
     models: tuple[str, ...] = ("parsec",),
     output_dirname: str = DEFAULT_OUTPUT_DIRNAME,
     mist_isochrone_dir: str | Path | None = None,
+    baraffe_isochrone_dir: str | Path | None = None,
     sample_n_clusters: int | None = None,
     sample_seed: int = 20260508,
     cluster_shard_count: int | None = None,
@@ -437,6 +439,11 @@ def run(
         models=tuple(models),
         configured_mist_dir=paths.inputs.mist_isochrone_dir,
         mist_isochrone_dir=mist_isochrone_dir,
+    )
+    baraffe_dir = _resolve_baraffe_dir_for_models(
+        models=tuple(models),
+        configured_baraffe_dir=paths.inputs.baraffe_isochrone_dir,
+        baraffe_isochrone_dir=baraffe_isochrone_dir,
     )
 
     selected, ordering_summary = select_full_catalog_clusters(
@@ -491,6 +498,8 @@ def run(
         isochrone_dirs["parsec"] = str(paths.inputs.parsec_isochrone_dir)
     if mist_dir is not None:
         isochrone_dirs["mist"] = str(mist_dir)
+    if baraffe_dir is not None:
+        isochrone_dirs["baraffe"] = str(baraffe_dir)
 
     if "parsec" in {model.lower() for model in models}:
         parsec_dir = Path(isochrone_dirs.get("parsec", str(_bundled_parsec_dir())))
@@ -577,6 +586,7 @@ def main() -> None:
     parser.add_argument("--models", nargs="+", default=("parsec",))
     parser.add_argument("--output-dirname", type=str, default=DEFAULT_OUTPUT_DIRNAME)
     parser.add_argument("--mist-isochrone-dir", type=str, default=None)
+    parser.add_argument("--baraffe-isochrone-dir", type=str, default=None)
     parser.add_argument("--sample-n-clusters", type=int, default=None)
     parser.add_argument("--sample-seed", type=int, default=20260508)
     parser.add_argument("--cluster-shard-count", type=int, default=None)
@@ -612,6 +622,7 @@ def main() -> None:
         models=tuple(args.models),
         output_dirname=args.output_dirname,
         mist_isochrone_dir=args.mist_isochrone_dir,
+        baraffe_isochrone_dir=args.baraffe_isochrone_dir,
         sample_n_clusters=args.sample_n_clusters,
         sample_seed=args.sample_seed,
         cluster_shard_count=args.cluster_shard_count,

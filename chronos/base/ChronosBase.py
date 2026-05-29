@@ -21,7 +21,12 @@ class ChronosBase:
         )
         # Check for Baraffe15 isochrones
         if ('baraffe' in models.lower()) or ('bhac' in models.lower()):
-            self.isochrone_handler = Baraffe15(str(data_path / 'baraffe_files'), file_ending='GAIA')
+            baraffe_dir = None
+            if isochrone_dirs is not None:
+                baraffe_dir = isochrone_dirs.get("baraffe")
+            if baraffe_dir is None:
+                baraffe_dir = data_path / 'baraffe_files'
+            self.isochrone_handler = Baraffe15(str(baraffe_dir), file_ending='GAIA')
             self.fitting_kwargs['fit_range'] = (-2, 12)
         elif 'dartmouth' in models.lower():
             self.isochrone_handler = Dartmouth(str(data_path / 'dartmouth_files'), file_ending='Gaia')

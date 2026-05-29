@@ -17,6 +17,7 @@ PRIORITY_HUNT_AGE_MAX_MYR="${PRIORITY_HUNT_AGE_MAX_MYR:-200}"
 PRIORITY_BOX_HALF_WIDTH_PC="${PRIORITY_BOX_HALF_WIDTH_PC:-1000}"
 FILTER_HUNT_AGE_MAX_MYR="${FILTER_HUNT_AGE_MAX_MYR:-}"
 FILTER_XY_HALF_WIDTH_PC="${FILTER_XY_HALF_WIDTH_PC:-}"
+MODELS="${MODELS:-parsec}"
 
 NWALKERS="${NWALKERS:-46}"
 AGE_MIN_MYR="${AGE_MIN_MYR:-1}"
@@ -29,6 +30,7 @@ N_IMFS="${N_IMFS:-1000}"
 POSTERIOR_SAMPLE_SIZE="${POSTERIOR_SAMPLE_SIZE:-20000}"
 
 if [[ -z "$RUN_NAME" ]]; then
+  model_label="${MODELS// /_}"
   posterior_label="$POSTERIOR_SAMPLE_SIZE"
   if [[ "$POSTERIOR_SAMPLE_SIZE" == "20000" ]]; then
     posterior_label="20k"
@@ -57,7 +59,7 @@ if [[ -z "$RUN_NAME" ]]; then
   else
     shard_label="${SHARD_COUNT}shards_${CLUSTER_SHARD_STRATEGY}shards"
   fi
-  RUN_NAME="full_catalog_mf_fit_parsec_${filter_label}_${shard_label}_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age_agemax${age_max_label}myr_${order_label}"
+  RUN_NAME="full_catalog_mf_fit_${model_label}_${filter_label}_${shard_label}_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age_agemax${age_max_label}myr_${order_label}"
 fi
 
 if [[ ! -f "$PROJECT_DIR/hpc/fasrc/chronos_full_catalog_mf_fit.sbatch" ]]; then
@@ -84,6 +86,8 @@ if [[ "$SHARD_COUNT" -gt 1 ]]; then
   shard_export="CLUSTER_SHARD_COUNT=$SHARD_COUNT,CLUSTER_SHARD_STRATEGY=$CLUSTER_SHARD_STRATEGY,$shard_export"
 fi
 
+read -r -a model_args <<< "$MODELS"
+
 array_cmd=(
   sbatch
   --parsable
@@ -99,7 +103,7 @@ fi
 array_cmd+=(
   --export "ALL,PROJECT_DIR=$PROJECT_DIR,OUTPUT_DIRNAME=$RUN_NAME,$shard_export,CATALOG_ORDER=$CATALOG_ORDER,PRIORITY_HUNT_AGE_MAX_MYR=$PRIORITY_HUNT_AGE_MAX_MYR,PRIORITY_BOX_HALF_WIDTH_PC=$PRIORITY_BOX_HALF_WIDTH_PC"
   "$PROJECT_DIR/hpc/fasrc/chronos_full_catalog_mf_fit.sbatch"
-  --models parsec
+  --models "${model_args[@]}"
   --age-min-myr "$AGE_MIN_MYR"
   --age-max-myr "$AGE_MAX_MYR"
   --age-prior "$AGE_PRIOR"
