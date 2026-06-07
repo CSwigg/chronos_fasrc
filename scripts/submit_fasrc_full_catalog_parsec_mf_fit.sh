@@ -23,6 +23,9 @@ NWALKERS="${NWALKERS:-46}"
 AGE_MIN_MYR="${AGE_MIN_MYR:-1}"
 AGE_MAX_MYR="${AGE_MAX_MYR:-12000}"
 AGE_PRIOR="${AGE_PRIOR:-linear}"
+AV_PRIOR="${AV_PRIOR:-dust}"
+AV_MIN_MAG="${AV_MIN_MAG:-0}"
+AV_MAX_MAG="${AV_MAX_MAG:-}"
 BURNIN="${BURNIN:-100}"
 NSTEPS="${NSTEPS:-1000}"
 MASS_DRAWS="${MASS_DRAWS:-1000}"
@@ -36,6 +39,12 @@ if [[ -z "$RUN_NAME" ]]; then
     posterior_label="20k"
   fi
   age_max_label="${AGE_MAX_MYR//./p}"
+  av_label="$AV_PRIOR"
+  if [[ -n "$AV_MAX_MAG" ]]; then
+    av_min_label="${AV_MIN_MAG//./p}"
+    av_max_label="${AV_MAX_MAG//./p}"
+    av_label="${AV_PRIOR}av${av_min_label}to${av_max_label}"
+  fi
   order_label="$CATALOG_ORDER"
   if [[ "$CATALOG_ORDER" == "hunt_young_solar_box" ]]; then
     priority_age_label="${PRIORITY_HUNT_AGE_MAX_MYR//./p}"
@@ -59,7 +68,20 @@ if [[ -z "$RUN_NAME" ]]; then
   else
     shard_label="${SHARD_COUNT}shards_${CLUSTER_SHARD_STRATEGY}shards"
   fi
-  RUN_NAME="full_catalog_mf_fit_${model_label}_${filter_label}_${shard_label}_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age_agemax${age_max_label}myr_${order_label}"
+  RUN_NAME="full_catalog_mf_fit_${model_label}_${filter_label}_${shard_label}_${NWALKERS}w_${BURNIN}b_${NSTEPS}s_${posterior_label}post_${MASS_DRAWS}mass_${AGE_PRIOR}age_agemax${age_max_label}myr_${av_label}_${order_label}"
+fi
+
+if [[ "$AV_PRIOR" != "dust" && "$AV_PRIOR" != "flat" ]]; then
+  echo "AV_PRIOR must be 'dust' or 'flat'; got '$AV_PRIOR'" >&2
+  exit 1
+fi
+if [[ "$AV_PRIOR" == "flat" && -z "$AV_MAX_MAG" ]]; then
+  echo "AV_PRIOR=flat requires AV_MAX_MAG, e.g. AV_MAX_MAG=5" >&2
+  exit 1
+fi
+if [[ "$RUN_NAME" == *flatav* && "$AV_PRIOR" != "flat" ]]; then
+  echo "RUN_NAME contains 'flatav' but AV_PRIOR=$AV_PRIOR. Set AV_PRIOR=flat AV_MIN_MAG=0 AV_MAX_MAG=5." >&2
+  exit 1
 fi
 
 if [[ ! -f "$PROJECT_DIR/hpc/fasrc/chronos_full_catalog_mf_fit.sbatch" ]]; then
@@ -107,6 +129,8 @@ array_cmd+=(
   --age-min-myr "$AGE_MIN_MYR"
   --age-max-myr "$AGE_MAX_MYR"
   --age-prior "$AGE_PRIOR"
+  --av-prior "$AV_PRIOR"
+  --av-min-mag "$AV_MIN_MAG"
   --nwalkers "$NWALKERS"
   --burnin "$BURNIN"
   --nsteps "$NSTEPS"
@@ -114,6 +138,9 @@ array_cmd+=(
   --n-imfs "$N_IMFS"
   --posterior-sample-size "$POSTERIOR_SAMPLE_SIZE"
 )
+if [[ -n "$AV_MAX_MAG" ]]; then
+  array_cmd+=(--av-max-mag "$AV_MAX_MAG")
+fi
 if [[ -n "$FILTER_HUNT_AGE_MAX_MYR" ]]; then
   array_cmd+=(--filter-hunt-age-max-myr "$FILTER_HUNT_AGE_MAX_MYR")
 fi

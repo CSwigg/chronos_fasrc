@@ -417,6 +417,9 @@ def run(
     age_min_myr: float = 1.0,
     age_max_myr: float = DEFAULT_AGE_MAX_MYR,
     age_prior: str = "linear",
+    av_prior: str = "dust",
+    av_min_mag: float = 0.0,
+    av_max_mag: float | None = None,
     nwalkers: int = 46,
     burnin: int = 100,
     nsteps: int = 1000,
@@ -434,7 +437,19 @@ def run(
 
     paths = load_runtime_paths(config_path)
     _require_input_file(paths.inputs.member_catalog_csv, label="member catalog")
-    _require_input_file(paths.inputs.extinction_healpix_fits, label="Edenhofer HEALPix extinction map")
+    av_prior = str(av_prior).strip().lower()
+    if av_prior not in {"dust", "flat"}:
+        raise ValueError(f"Unsupported av_prior={av_prior!r}; expected 'dust' or 'flat'.")
+    av_min = float(av_min_mag)
+    av_max = np.inf if av_max_mag is None else float(av_max_mag)
+    if not np.isfinite(av_min) or av_min < 0.0:
+        raise ValueError(f"--av-min-mag must be finite and >= 0; got {av_min_mag!r}.")
+    if av_max <= av_min:
+        raise ValueError(f"--av-max-mag must be greater than --av-min-mag; got {av_max_mag!r}.")
+    if av_prior == "flat" and not np.isfinite(av_max):
+        raise ValueError("--av-prior flat requires a finite --av-max-mag.")
+    if av_prior == "dust":
+        _require_input_file(paths.inputs.extinction_healpix_fits, label="Edenhofer HEALPix extinction map")
     mist_dir = _resolve_mist_dir_for_models(
         models=tuple(models),
         configured_mist_dir=paths.inputs.mist_isochrone_dir,
@@ -485,6 +500,9 @@ def run(
         "rv_cut_enabled": False,
         "map_box_cut_enabled": filter_xy_half_width_pc is not None,
         "age_prior": str(age_prior),
+        "av_prior": av_prior,
+        "av_min_mag": av_min,
+        "av_max_mag": av_max if np.isfinite(av_max) else None,
     }
     _write_selection(
         selected,
@@ -511,6 +529,7 @@ def run(
 
     fit_config = ChronosFitConfig(
         age_range_myr=(float(age_min_myr), float(age_max_myr)),
+        av_range=(av_min, av_max),
         nwalkers=int(nwalkers),
         burnin=int(burnin),
         nsteps=int(nsteps),
@@ -519,6 +538,7 @@ def run(
     run_config = DualModelRunConfig(
         fit_config=fit_config,
         age_prior=str(age_prior),
+        use_dust_prior=(av_prior == "dust"),
         include_swiggum_masses=True,
         mass_n_draws=int(mass_draws),
         mass_n_imfs=int(n_imfs),
@@ -553,6 +573,8 @@ def run(
         f" | filter_xy_half_width_pc={filter_summary['filter_xy_half_width_pc']}"
         f" | age_range_myr={age_min_myr}-{age_max_myr}"
         f" | age_prior={age_prior}"
+        f" | av_prior={av_prior}"
+        f" | av_range_mag={av_min}-{av_max if np.isfinite(av_max) else 'inf'}"
         f" | nwalkers={nwalkers}"
         f" | burnin={burnin}"
         f" | nsteps={nsteps}"
@@ -604,6 +626,9 @@ def main() -> None:
     parser.add_argument("--age-min-myr", type=float, default=1.0)
     parser.add_argument("--age-max-myr", type=float, default=DEFAULT_AGE_MAX_MYR)
     parser.add_argument("--age-prior", choices=("linear", "log"), default="linear")
+    parser.add_argument("--av-prior", choices=("dust", "flat"), default="dust")
+    parser.add_argument("--av-min-mag", type=float, default=0.0)
+    parser.add_argument("--av-max-mag", type=float, default=None)
     parser.add_argument("--nwalkers", type=int, default=46)
     parser.add_argument("--burnin", type=int, default=100)
     parser.add_argument("--nsteps", type=int, default=1000)
@@ -636,6 +661,9 @@ def main() -> None:
         age_min_myr=args.age_min_myr,
         age_max_myr=args.age_max_myr,
         age_prior=args.age_prior,
+        av_prior=args.av_prior,
+        av_min_mag=args.av_min_mag,
+        av_max_mag=args.av_max_mag,
         nwalkers=args.nwalkers,
         burnin=args.burnin,
         nsteps=args.nsteps,

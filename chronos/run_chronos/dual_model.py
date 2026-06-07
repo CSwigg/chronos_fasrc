@@ -67,6 +67,7 @@ class DualModelRunConfig:
     fit_config: ChronosFitConfig = ChronosFitConfig()
     age_prior: str = "log"
     sigma_av: float = 0.10
+    use_dust_prior: bool = True
     binary_mass_scale: float = 1.25
     include_swiggum_masses: bool = False
     mass_n_draws: int = 100
@@ -221,6 +222,21 @@ def _build_extinction_descriptor(details: pd.DataFrame, sigma_av: float) -> Exti
     )
 
 
+def _build_flat_extinction_descriptor(total_count: int) -> ExtinctionPriorDescriptor:
+    return ExtinctionPriorDescriptor(
+        mode="flat",
+        center_av=None,
+        floor_av=None,
+        sigma_av=0.0,
+        valid_fraction=0.0,
+        valid_count=0,
+        total_count=int(total_count),
+        map_name="none",
+        map_counts={},
+        floor_map_counts={},
+    )
+
+
 class ChronosSkewCauchyBayesAVPrior(ChronosSkewCauchyBayes):
     def __init__(self, *args, extinction_prior: ExtinctionPriorDescriptor, age_prior: str = "log", **kwargs):
         super().__init__(*args, **kwargs)
@@ -232,11 +248,11 @@ class ChronosSkewCauchyBayesAVPrior(ChronosSkewCauchyBayes):
         if not np.all(np.isfinite(theta)):
             return -np.inf
 
-        log_age_range, feh_range, _av_range, skewness_range, scale_range = self.bounds
+        log_age_range, feh_range, av_range, skewness_range, scale_range = self.bounds
         if not (
             log_age_range[0] <= log_age <= log_age_range[1]
             and feh_range[0] <= feh <= feh_range[1]
-            and av >= 0.0
+            and av_range[0] <= av <= av_range[1]
             and skewness_range[0] <= skewness <= skewness_range[1]
             and scale_range[0] <= scale <= scale_range[1]
         ):
@@ -247,6 +263,9 @@ class ChronosSkewCauchyBayesAVPrior(ChronosSkewCauchyBayes):
             base += float(log_age) * math.log(10.0)
         elif self.age_prior not in {"log", "logage", "log_age"}:
             raise ValueError(f"Unsupported age_prior={self.age_prior!r}")
+
+        if self.extinction_prior.mode == "flat":
+            return base
 
         sigma = max(float(self.extinction_prior.sigma_av), 1e-6)
         if self.extinction_prior.mode == "gaussian":
@@ -259,6 +278,14 @@ class ChronosSkewCauchyBayesAVPrior(ChronosSkewCauchyBayes):
         return base - 0.5 * ((av - floor) / sigma) ** 2
 
     def _initial_av_range(self) -> tuple[float, float]:
+        if self.extinction_prior.mode == "flat":
+            low, high = self.bounds[2]
+            low = max(float(low), 0.0)
+            high = float(high)
+            if not np.isfinite(high):
+                high = max(low + 5.0, 5.0)
+            return low, high
+
         sigma = max(float(self.extinction_prior.sigma_av), 1e-6)
         if self.extinction_prior.mode == "gaussian":
             center = _clean_float(self.extinction_prior.center_av) or 0.0
@@ -734,6 +761,18 @@ def _init_worker(
     _WORKER_CLUSTER_METADATA = cluster_metadata
     _WORKER_RUN_CONFIG = run_config
     _WORKER_OUTPUT_ROOT = Path(output_root)
+    if not run_config.use_dust_prior:
+        _WORKER_EXTINCTION_PRIOR = None
+        if run_config.quiet_worker_output:
+            init_log = _WORKER_OUTPUT_ROOT / "worker_logs" / f"worker_init_{os.getpid()}.log"
+            init_log.parent.mkdir(parents=True, exist_ok=True)
+            with init_log.open("a", encoding="utf-8", buffering=1) as log_handle:
+                log_handle.write(
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} | "
+                    f"worker init pid={os.getpid()} | dust prior disabled\n"
+                )
+        return
+
     if run_config.quiet_worker_output:
         init_log = _WORKER_OUTPUT_ROOT / "worker_logs" / f"worker_init_{os.getpid()}.log"
         init_log.parent.mkdir(parents=True, exist_ok=True)
@@ -756,17 +795,22 @@ def _init_worker(
 
 
 def _process_cluster_uncaptured(cluster_name: str) -> dict[str, Any]:
-    if _WORKER_EXTINCTION_PRIOR is None or _WORKER_RUN_CONFIG is None or _WORKER_OUTPUT_ROOT is None:
+    if _WORKER_RUN_CONFIG is None or _WORKER_OUTPUT_ROOT is None:
         raise RuntimeError("worker globals not initialized")
 
     df_group = _WORKER_CLUSTER_DATA[cluster_name]
     cluster_row = pd.Series(_WORKER_CLUSTER_METADATA.get(cluster_name, {"name": cluster_name}))
-    details = _WORKER_EXTINCTION_PRIOR.compute_prior_details(
-        ra=df_group["ra"],
-        dec=df_group["dec"],
-        distance=df_group["distance_50"],
-    )
-    descriptor = _build_extinction_descriptor(details=details, sigma_av=_WORKER_RUN_CONFIG.sigma_av)
+    if _WORKER_RUN_CONFIG.use_dust_prior:
+        if _WORKER_EXTINCTION_PRIOR is None:
+            raise RuntimeError("dust-prior worker globals not initialized")
+        details = _WORKER_EXTINCTION_PRIOR.compute_prior_details(
+            ra=df_group["ra"],
+            dec=df_group["dec"],
+            distance=df_group["distance_50"],
+        )
+        descriptor = _build_extinction_descriptor(details=details, sigma_av=_WORKER_RUN_CONFIG.sigma_av)
+    else:
+        descriptor = _build_flat_extinction_descriptor(total_count=len(df_group))
 
     model_results = {
         model_name: _fit_single_model(
@@ -972,6 +1016,11 @@ def _print_terminal_banner(
         f"output: {output_root}",
         f"models: {', '.join(run_config.model_names)}",
         f"age_prior: {run_config.age_prior}",
+        (
+            "av_prior: dust-map informed"
+            if run_config.use_dust_prior
+            else f"av_prior: flat {run_config.fit_config.av_range[0]}-{run_config.fit_config.av_range[1]} mag"
+        ),
         f"clusters: total={total_clusters} pending={pending_clusters} already_complete={completed_at_start}",
         f"workers: n_processes={n_processes} chunksize={chunksize}",
     ]
@@ -1167,9 +1216,9 @@ def run_dual_model_refit(
             initargs=(
                 grouped_data,
                 cluster_metadata,
-                str(paths.inputs.extinction_healpix_fits),
-                str(paths.inputs.bayestar2019_h5) if paths.inputs.bayestar2019_h5 is not None else None,
-                str(paths.inputs.decaps_h5) if paths.inputs.decaps_h5 is not None else None,
+                str(paths.inputs.extinction_healpix_fits) if run_config.use_dust_prior else "",
+                str(paths.inputs.bayestar2019_h5) if run_config.use_dust_prior and paths.inputs.bayestar2019_h5 is not None else None,
+                str(paths.inputs.decaps_h5) if run_config.use_dust_prior and paths.inputs.decaps_h5 is not None else None,
                 str(output_root),
                 run_config,
             ),
